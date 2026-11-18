@@ -1,0 +1,7 @@
+{
+  "tiers": {
+    "precise": {"prefer": [{"family": "sol"}, {"default": true}], "effort": ["high", "medium"]},
+    "balanced": {"prefer": [{"family": "terra"}, {"default": true}], "effort": ["medium", "low"]},
+    "fast": {"prefer": [{"family": "luna"}, {"family": "terra"}], "effort": ["low"]}
+  }
+}

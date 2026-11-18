@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decisions"],
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pair", "verdict", "name", "definition"],
+        "properties": {
+          "pair": {"type": "string"},
+          "verdict": {"type": "string", "enum": ["same", "different", "unknown"]},
+          "name": {"type": "string"},
+          "definition": {"type": "string"}
+        }
+      }
+    }
+  }
+}

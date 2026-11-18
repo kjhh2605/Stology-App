@@ -1,0 +1,36 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["units", "links"],
+  "properties": {
+    "units": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "description", "concepts"],
+        "properties": {
+          "name": {"type": "string"},
+          "description": {"type": "string"},
+          "concepts": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["subject", "object", "type", "reason", "condition", "negated"],
+        "properties": {
+          "subject": {"type": "string"},
+          "object": {"type": "string"},
+          "type": {"type": "string", "enum": ["kind_of", "part_of", "prerequisite", "cause", "contrast", "example", "applies", "related"]},
+          "reason": {"type": "string"},
+          "condition": {"type": "string"},
+          "negated": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

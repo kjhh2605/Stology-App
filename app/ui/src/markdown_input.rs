@@ -1,0 +1,706 @@
+//! Markdown source edits for native rich-editor keyboard commands.
+//!
+//! These are pure transformations: callers guard marked text/selection and apply
+//! exactly one native replacement, keeping undo and the Markdown source intact.
+use std::ops::Range;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    Enter,
+    ShiftEnter,
+    Tab,
+    BackTab,
+    Backspace,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Edit {
+    pub range: Range<usize>,
+    pub replacement: String,
+    /// Absolute UTF-8 byte offset in the resulting source.
+    pub caret: usize,
+}
+
+fn leading_indent(line: &str) -> usize {
+    line.bytes()
+        .take_while(|b| matches!(b, b' ' | b'\t'))
+        .count()
+}
+
+/// Move the item and its contiguous children together, never inserting a tab
+/// into the visible text. Two spaces are one bullet nesting level.
+fn indent_item(source: &str, start: usize, caret: usize, outdent: bool) -> Edit {
+    let line = source[start..].split('\n').next().unwrap_or("");
+    let indent = leading_indent(line);
+    let remove = if line.starts_with('\t') {
+        1
+    } else {
+        indent.min(2)
+    };
+    if outdent && remove == 0 {
+        return insert(caret, "");
+    }
+    if !outdent {
+        // An isolated first item may move right once. Deeper indentation needs
+        // a preceding parent, otherwise CommonMark turns it into literal code.
+        let previous = source[..start].lines().rev().find(|s| !s.trim().is_empty());
+        let limit = previous
+            .and_then(|s| {
+                list_or_quote_prefix(s)
+                    .filter(|p| !p.quote)
+                    .map(|_| leading_indent(s) + 2)
+            })
+            .unwrap_or(2);
+        if indent + 2 > limit {
+            return insert(caret, "");
+        }
+    }
+    let mut end = start;
+    let mut replacement = String::new();
+    for (index, raw) in source[start..].split_inclusive('\n').enumerate() {
+        if index > 0 && (raw.trim().is_empty() || leading_indent(raw) <= indent) {
+            break;
+        }
+        if outdent {
+            replacement.push_str(&raw[remove.min(leading_indent(raw))..]);
+        } else {
+            replacement.push_str("  ");
+            replacement.push_str(raw);
+        }
+        end += raw.len();
+    }
+    Edit {
+        range: start..end,
+        replacement,
+        caret: if outdent {
+            caret.saturating_sub(remove).max(start)
+        } else {
+            caret + 2
+        },
+    }
+}
+
+#[derive(Debug)]
+struct Fence {
+    bytes: Range<usize>,
+    opening_end: usize,
+    body: Range<usize>,
+    closing: Option<Range<usize>>,
+    marker: String,
+}
+
+fn line_without_ending(line: &str) -> &str {
+    line.trim_end_matches(['\r', '\n'])
+}
+
+fn opening(line: &str) -> Option<(&str, &str)> {
+    let indent = line.bytes().take_while(|b| *b == b' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let first = *rest.as_bytes().first()?;
+    if first != b'`' && first != b'~' {
+        return None;
+    }
+    let count = rest.bytes().take_while(|b| *b == first).count();
+    if count < 3 || (first == b'`' && rest[count..].contains('`')) {
+        return None;
+    }
+    Some((&rest[..count], rest[count..].trim()))
+}
+
+fn is_closing(line: &str, marker: &str) -> bool {
+    let indent = line.bytes().take_while(|b| *b == b' ').count();
+    if indent > 3 {
+        return false;
+    }
+    let rest = &line[indent..];
+    let count = rest
+        .bytes()
+        .take_while(|b| *b == marker.as_bytes()[0])
+        .count();
+    count >= marker.len() && rest[count..].trim().is_empty()
+}
+
+fn fences(source: &str) -> Vec<Fence> {
+    let mut result = Vec::new();
+    let mut current: Option<Fence> = None;
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        let raw = line_without_ending(line);
+        if let Some(block) = current.as_mut() {
+            if is_closing(raw, &block.marker) {
+                let mut block = current.take().unwrap();
+                block.bytes.end = offset + line.len();
+                block.body.end = offset;
+                // The newline immediately before a closing fence is Markdown
+                // structure, not the code block's editable final newline.
+                if block.body.end > block.body.start && source[..block.body.end].ends_with('\n') {
+                    block.body.end -= 1;
+                    if source[..block.body.end].ends_with('\r') {
+                        block.body.end -= 1;
+                    }
+                }
+                block.closing = Some(offset..offset + line.len());
+                result.push(block);
+            }
+        } else if let Some((marker, _)) = opening(raw) {
+            current = Some(Fence {
+                bytes: offset..source.len(),
+                opening_end: offset + raw.len(),
+                body: offset + line.len()..source.len(),
+                closing: None,
+                marker: marker.to_string(),
+            });
+        }
+        offset += line.len();
+    }
+    if let Some(block) = current {
+        result.push(block);
+    }
+    result
+}
+
+fn language_id(value: &str) -> String {
+    match value.to_ascii_lowercase().as_str() {
+        "js" | "javascript" => "javascript".into(),
+        "ts" | "typescript" => "typescript".into(),
+        "py" | "python" => "python".into(),
+        "rs" | "rust" => "rust".into(),
+        "sh" | "shell" | "bash" => "bash".into(),
+        "java" => "java".into(),
+        "c#" | "cs" | "csharp" => "csharp".into(),
+        "c++" | "cpp" => "cpp".into(),
+        "plaintext" | "plain" | "txt" | "text" | "" => "text".into(),
+        _ => value.into(),
+    }
+}
+
+fn insert(caret: usize, value: &str) -> Edit {
+    Edit {
+        range: caret..caret,
+        replacement: value.into(),
+        caret: caret + value.len(),
+    }
+}
+
+fn newline(source: &str) -> &'static str {
+    if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+fn next_content(source: &str, start: usize) -> Option<usize> {
+    let mut position = start;
+    for line in source[start..].split_inclusive('\n') {
+        if !line.trim().is_empty() {
+            return Some(position);
+        }
+        position += line.len();
+    }
+    None
+}
+
+/// Clamp a caret produced by native movement out of concealed code fences.
+/// Inputs and outputs are UTF-8 byte offsets. Call after native movement; `true`
+/// means left/up and `false` means right/down. Editable body boundaries are
+/// valid positions. At a document edge the caret stays in the code body.
+pub fn fenced_caret(source: &str, caret: usize, backwards: bool) -> Option<usize> {
+    if caret > source.len() || !source.is_char_boundary(caret) {
+        return None;
+    }
+    for block in fences(source) {
+        // No committed newline: the user is still typing the fence shortcut.
+        if block.opening_end == block.body.start {
+            continue;
+        }
+        if block.bytes.start <= caret && caret < block.body.start {
+            let previous = source[..block.bytes.start].trim_end_matches(['\r', '\n']);
+            return Some(if backwards && !previous.is_empty() {
+                previous.len()
+            } else {
+                block.body.start
+            });
+        }
+        if block.closing.is_some() && block.body.end < caret && caret <= block.bytes.end {
+            return Some(if backwards {
+                block.body.end
+            } else {
+                next_content(source, block.bytes.end).unwrap_or(block.body.end)
+            });
+        }
+    }
+    None
+}
+
+fn exit_code(source: &str, block: &Fence, trim: usize, force_new: bool) -> Edit {
+    let remove_start = block.body.end - trim;
+    let ending = newline(source);
+    if let Some(closing) = &block.closing {
+        if !force_new {
+            if let Some(next) = next_content(source, closing.end) {
+                return Edit {
+                    range: remove_start..block.body.end,
+                    replacement: String::new(),
+                    caret: next - trim,
+                };
+            }
+        }
+        let mut replacement = source[block.body.end..block.bytes.end].to_string();
+        if !replacement.ends_with('\n') {
+            replacement.push_str(ending);
+        }
+        replacement.push_str(ending);
+        let caret = remove_start + replacement.len();
+        // When a next block exists, put a fresh empty paragraph before it.
+        if force_new && block.bytes.end < source.len() {
+            replacement.push_str(ending);
+        }
+        Edit {
+            range: remove_start..block.bytes.end,
+            replacement,
+            caret,
+        }
+    } else {
+        let replacement = format!("{ending}{}{ending}{ending}", block.marker);
+        Edit {
+            range: remove_start..block.body.end,
+            caret: remove_start + replacement.len(),
+            replacement,
+        }
+    }
+}
+
+struct Prefix {
+    end: usize,
+    next: String,
+    quote: bool,
+}
+fn list_or_quote_prefix(line: &str) -> Option<Prefix> {
+    let indent = line
+        .bytes()
+        .take_while(|b| *b == b' ' || *b == b'\t')
+        .count();
+    let rest = &line[indent..];
+    let mut length;
+    let mut next;
+    let mut quote = false;
+    if rest.starts_with('>') && matches!(rest.as_bytes().get(1), Some(b' ' | b'\t')) {
+        length = 2;
+        while rest[length..].starts_with("> ") {
+            length += 2;
+        }
+        next = rest[..length].to_string();
+        quote = true;
+    } else if matches!(rest.as_bytes().first(), Some(b'-' | b'+' | b'*'))
+        && matches!(rest.as_bytes().get(1), Some(b' ' | b'\t'))
+    {
+        length = 2;
+        next = rest[..length].to_string();
+    } else {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0
+            || digits > 9
+            || !matches!(rest.as_bytes().get(digits), Some(b'.' | b')'))
+            || !matches!(rest.as_bytes().get(digits + 1), Some(b' ' | b'\t'))
+        {
+            return None;
+        }
+        let number: u64 = rest[..digits].parse().ok()?;
+        length = digits + 2;
+        next = format!("{}{} ", number + 1, rest.as_bytes()[digits] as char);
+    }
+    while matches!(rest.as_bytes().get(length), Some(b' ' | b'\t')) {
+        length += 1;
+    }
+    if rest[length..].starts_with("[ ] ")
+        || rest[length..].starts_with("[x] ")
+        || rest[length..].starts_with("[X] ")
+    {
+        length += 4;
+        next.push_str("[ ] ");
+    }
+    Some(Prefix {
+        end: indent + length,
+        next: format!("{}{next}", &line[..indent]),
+        quote,
+    })
+}
+
+/// Return one source edit for a collapsed selection, or let native text editing
+/// handle the command. Invalid offsets are rejected instead of panicking.
+pub fn command(source: &str, caret: usize, command: Command) -> Option<Edit> {
+    if caret > source.len() || !source.is_char_boundary(caret) {
+        return None;
+    }
+    let ending = newline(source);
+    for block in fences(source) {
+        // The fence becomes a code block only once Enter commits the shortcut.
+        if command == Command::Enter && caret == block.opening_end && block.closing.is_none() {
+            let raw = &source[block.bytes.start..block.opening_end];
+            let (marker, language) = opening(raw)?;
+            let replacement = format!(
+                "{}{}{ending}{ending}{marker}",
+                marker,
+                language_id(language)
+            );
+            let caret =
+                block.bytes.start + marker.len() + language_id(language).len() + ending.len();
+            return Some(Edit {
+                range: block.bytes.start..block.opening_end,
+                replacement,
+                caret,
+            });
+        }
+        if block.body.start <= caret && caret <= block.body.end {
+            return match command {
+                Command::BackTab => None,
+                Command::Tab => {
+                    if block
+                        .closing
+                        .as_ref()
+                        .is_some_and(|c| c.start == block.body.start)
+                    {
+                        // Imported empty fences may have no intervening body
+                        // line. Keep the closing fence on its own line.
+                        let mut edit = insert(caret, &format!("  {ending}"));
+                        edit.caret = caret + 2;
+                        Some(edit)
+                    } else {
+                        Some(insert(caret, "  "))
+                    }
+                }
+                Command::ShiftEnter => Some(exit_code(source, &block, 0, true)),
+                Command::Enter => {
+                    let content = &source[block.body.clone()];
+                    let double = format!("{ending}{ending}");
+                    if caret == block.body.end && content.ends_with(&double) {
+                        Some(exit_code(source, &block, double.len(), false))
+                    } else {
+                        Some(insert(caret, ending))
+                    }
+                }
+                Command::Backspace => {
+                    if caret == block.body.start && block.body.is_empty() {
+                        // Empty code block -> paragraph, with a single undoable edit.
+                        Some(Edit {
+                            range: block.bytes.clone(),
+                            replacement: String::new(),
+                            caret: block.bytes.start,
+                        })
+                    } else if caret == block.body.start {
+                        // The opening newline is structure. Deleting it would
+                        // concatenate the first code token into the language ID.
+                        Some(Edit {
+                            range: caret..caret,
+                            replacement: String::new(),
+                            caret,
+                        })
+                    } else {
+                        None
+                    }
+                }
+            };
+        }
+        // Never interpret code text as list or quote syntax, including fences.
+        if block.bytes.start <= caret && caret < block.bytes.end {
+            return None;
+        }
+    }
+    let start = source[..caret].rfind('\n').map(|n| n + 1).unwrap_or(0);
+    let end = source[caret..]
+        .find('\n')
+        .map(|n| caret + n)
+        .unwrap_or(source.len());
+    let line = line_without_ending(&source[start..end]);
+    if command == Command::Enter {
+        let indent = line.bytes().take_while(|b| *b == b' ').count();
+        let hashes = line[indent..].bytes().take_while(|b| *b == b'#').count();
+        let hash_end = indent + hashes;
+        if indent <= 3
+            && (1..=6).contains(&hashes)
+            && matches!(line.as_bytes().get(hash_end), Some(b' ' | b'\t'))
+        {
+            let spaces = line[hash_end..]
+                .bytes()
+                .take_while(|b| *b == b' ' || *b == b'\t')
+                .count();
+            let prefix_end = hash_end + spaces;
+            if caret == start + prefix_end && prefix_end < line.len() {
+                return Some(Edit {
+                    range: start..start,
+                    replacement: ending.into(),
+                    caret: caret + ending.len(),
+                });
+            }
+        }
+    }
+    let prefix = list_or_quote_prefix(line)?;
+    if caret < start + prefix.end {
+        return None;
+    }
+    let indent = leading_indent(line);
+    let bullet = matches!(line.as_bytes().get(indent), Some(b'-' | b'+' | b'*')) && !prefix.quote;
+    if bullet && matches!(command, Command::Tab | Command::BackTab) {
+        let literal_code =
+            pulldown_cmark::Parser::new(source)
+                .into_offset_iter()
+                .any(|(event, range)| {
+                    matches!(
+                        event,
+                        pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_))
+                    ) && range.start < end
+                        && start < range.end
+                });
+        if !literal_code {
+            return Some(indent_item(
+                source,
+                start,
+                caret,
+                command == Command::BackTab,
+            ));
+        }
+        return None;
+    }
+    if command == Command::Enter
+        && !prefix.quote
+        && indent > 0
+        && line[prefix.end..].trim().is_empty()
+    {
+        return Some(indent_item(source, start, caret, true));
+    }
+    match command {
+        Command::Backspace if caret == start + prefix.end => Some(Edit {
+            range: start..start + prefix.end,
+            replacement: String::new(),
+            caret: start,
+        }),
+        Command::Enter if line[prefix.end..].trim().is_empty() => Some(Edit {
+            range: start..start + line.len(),
+            replacement: String::new(),
+            caret: start,
+        }),
+        // BlockNote's quote uses the default split-to-paragraph behavior.
+        // Markdown needs a blank separator to avoid lazy quote continuation.
+        Command::Enter if prefix.quote => Some(insert(caret, &format!("{ending}{ending}"))),
+        Command::ShiftEnter if prefix.quote => {
+            Some(insert(caret, &format!("{ending}{}", prefix.next)))
+        }
+        Command::Enter => Some(insert(caret, &format!("{ending}{}", prefix.next))),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn bullet_tab_enter_outdent_exit_sequence() {
+        for marker in ["-", "*", "+"] {
+            let source = format!("{marker} 부모\n{marker} 자식 😀");
+            let (nested, caret) = apply(&source, source.len(), Command::Tab);
+            assert_eq!(nested, format!("{marker} 부모\n  {marker} 자식 😀"));
+            let (empty, caret) = apply(&nested, caret, Command::Enter);
+            assert_eq!(empty, format!("{nested}\n  {marker} "));
+            let (parent, caret) = apply(&empty, caret, Command::Enter);
+            assert_eq!(parent, format!("{nested}\n{marker} "));
+            let (plain, caret) = apply(&parent, caret, Command::Enter);
+            assert_eq!(plain, format!("{nested}\n"));
+            assert_eq!(caret, plain.len());
+        }
+    }
+    #[test]
+    fn bullet_indent_moves_children_and_preserves_midline_caret() {
+        let source = "- 부모\r\n- 자식 😀\r\n  - 하위\r\n- 다음";
+        let caret = source.find('😀').unwrap();
+        let (nested, after) = apply(source, caret, Command::Tab);
+        assert_eq!(nested, "- 부모\r\n  - 자식 😀\r\n    - 하위\r\n- 다음");
+        assert_eq!(&nested[after..after + 4], "😀");
+        let (restored, after) = apply(&nested, after, Command::BackTab);
+        assert_eq!(restored, source);
+        assert_eq!(after, caret);
+        assert_eq!(apply("- ", 2, Command::BackTab), ("- ".into(), 2));
+        let (first, caret) = apply("- ", 2, Command::Tab);
+        assert_eq!(first, "  - ");
+        assert_eq!(apply(&first, caret, Command::Tab), (first, caret));
+        assert!(command("```\n- code\n```", 10, Command::BackTab).is_none());
+        assert!(command("    - literal", 13, Command::Tab).is_none());
+    }
+    fn apply(source: &str, caret: usize, key: Command) -> (String, usize) {
+        let edit = command(source, caret, key).expect("command should be handled");
+        assert!(
+            source.is_char_boundary(edit.range.start) && source.is_char_boundary(edit.range.end)
+        );
+        let mut result = source.to_string();
+        result.replace_range(edit.range, &edit.replacement);
+        assert!(result.is_char_boundary(edit.caret));
+        (result, edit.caret)
+    }
+    #[test]
+    fn fence_shortcut_creates_empty_body_and_normalizes_alias() {
+        let (text, caret) = apply("```js", 5, Command::Enter);
+        assert_eq!(text, "```javascript\n\n```");
+        assert_eq!(&text[..caret], "```javascript\n");
+        let (text, _) = apply("```my-Dsl", 9, Command::Enter);
+        assert_eq!(text, "```my-Dsl\n\n```");
+        let source = "앞\n\n```java\n\n뒤";
+        let caret = source.find("java").unwrap() + 4;
+        let (text, caret) = apply(source, caret, Command::Enter);
+        assert_eq!(text, "앞\n\n```java\n\n```\n\n뒤");
+        assert!(text[caret..].starts_with("\n```"));
+    }
+    #[test]
+    fn code_tab_and_enter_do_not_create_markdown_lists() {
+        let source = "```rust\n- literal\n```";
+        let caret = source.find("\n```").unwrap();
+        let (text, caret) = apply(source, caret, Command::Enter);
+        assert_eq!(text, "```rust\n- literal\n\n```");
+        let (text, _) = apply(&text, caret, Command::Tab);
+        assert_eq!(text, "```rust\n- literal\n  \n```");
+    }
+    #[test]
+    fn double_newline_exit_preserves_fence_and_moves_to_existing_paragraph() {
+        let source = "```java\nhello\n\n\n```\n\n다음 문단";
+        let caret = source.find("\n```").unwrap();
+        let (text, caret) = apply(source, caret, Command::Enter);
+        assert_eq!(text, "```java\nhello\n```\n\n다음 문단");
+        assert_eq!(&text[caret..], "다음 문단");
+    }
+    #[test]
+    fn double_newline_exit_creates_paragraph_at_eof() {
+        let source = "```\na\n\n\n```";
+        let caret = source.find("\n```").unwrap();
+        let (text, caret) = apply(source, caret, Command::Enter);
+        assert_eq!(text, "```\na\n```\n\n");
+        assert_eq!(caret, text.len());
+    }
+    #[test]
+    fn shift_enter_exits_from_middle_without_deleting_code() {
+        let source = "```python\nprint('한글 😀')\n```";
+        let caret = source.find("한글").unwrap();
+        let (text, caret) = apply(source, caret, Command::ShiftEnter);
+        assert_eq!(text, format!("{source}\n\n"));
+        assert_eq!(caret, text.len());
+    }
+    #[test]
+    fn unclosed_fence_can_exit_and_close_safely() {
+        let source = "~~~rust\nfn main() {}\n\n";
+        let (text, caret) = apply(source, source.len(), Command::Enter);
+        assert_eq!(text, "~~~rust\nfn main() {}\n~~~\n\n");
+        assert_eq!(caret, text.len());
+    }
+    #[test]
+    fn ordered_task_and_nested_list_continue() {
+        for (source, expected) in [
+            ("- 내용", "- 내용\n- "),
+            ("  * 내용", "  * 내용\n  * "),
+            ("9. 내용", "9. 내용\n10. "),
+            ("2) 내용", "2) 내용\n3) "),
+            ("- [x] 완료", "- [x] 완료\n- [ ] "),
+            ("> 인용", "> 인용\n\n"),
+        ] {
+            let (text, caret) = apply(source, source.len(), Command::Enter);
+            assert_eq!(text, expected);
+            assert_eq!(caret, text.len());
+        }
+    }
+    #[test]
+    fn empty_list_enter_and_prefix_backspace_become_paragraph() {
+        for source in ["- ", "4. ", "- [ ] ", "> "] {
+            assert_eq!(
+                apply(source, source.len(), Command::Enter),
+                (String::new(), 0)
+            );
+        }
+        let source = "앞 😀\n- [x] 한글";
+        let caret = source.find("한글").unwrap();
+        let (text, caret) = apply(source, caret, Command::Backspace);
+        assert_eq!(text, "앞 😀\n한글");
+        assert_eq!(&text[caret..], "한글");
+    }
+    #[test]
+    fn list_split_in_middle_and_crlf_preserve_offsets() {
+        let source = "앞\r\n- 가나다";
+        let caret = source.find("다").unwrap();
+        let (text, caret) = apply(source, caret, Command::Enter);
+        assert_eq!(text, "앞\r\n- 가나\r\n- 다");
+        assert_eq!(&text[caret..], "다");
+    }
+    #[test]
+    fn invalid_offsets_plain_text_and_code_backspace_pass_through() {
+        assert!(command("한글", 1, Command::Enter).is_none());
+        assert!(command("hello", 50, Command::Enter).is_none());
+        assert!(command("not a list", 10, Command::Enter).is_none());
+        let source = "```text\n- item\n```";
+        assert!(command(source, source.find("item").unwrap(), Command::Backspace).is_none());
+    }
+    #[test]
+    fn empty_code_backspace_removes_whole_block() {
+        let source = "before\n\n```text\n\n```\n\nafter";
+        let caret = source.find("```text\n").unwrap() + "```text\n".len();
+        let (text, caret) = apply(source, caret, Command::Backspace);
+        assert_eq!(text, "before\n\n\nafter");
+        assert_eq!(&text[caret..], "\nafter");
+    }
+    #[test]
+    fn enter_at_heading_start_preserves_existing_heading() {
+        let source = "앞 😀\n\n## 제목";
+        let caret = source.find("제목").unwrap();
+        let (text, caret) = apply(source, caret, Command::Enter);
+        assert_eq!(text, "앞 😀\n\n\n## 제목");
+        assert_eq!(&text[caret..], "제목");
+    }
+    #[test]
+    fn crlf_code_enter_and_exit_preserve_line_endings() {
+        let source = "```rust\r\n한글\r\n\r\n\r\n```\r\n\r\n다음";
+        let caret = source.find("\r\n```").unwrap();
+        let (text, caret) = apply(source, caret, Command::Enter);
+        assert_eq!(text, "```rust\r\n한글\r\n```\r\n\r\n다음");
+        assert_eq!(&text[caret..], "다음");
+    }
+    #[test]
+    fn tab_in_imported_empty_code_keeps_closing_fence() {
+        let source = "```java\n```";
+        let (text, caret) = apply(source, "```java\n".len(), Command::Tab);
+        assert_eq!(text, "```java\n  \n```");
+        assert_eq!(&text[caret..], "\n```");
+    }
+    #[test]
+    fn backspace_at_code_body_start_cannot_corrupt_language() {
+        for source in [
+            "```java\nX\n```",
+            "~~~python\r\n한글\r\n~~~",
+            "```rust\nfn main() {}",
+        ] {
+            let caret = source.find('\n').unwrap() + 1;
+            let (text, after) = apply(source, caret, Command::Backspace);
+            assert_eq!(text, source);
+            assert_eq!(after, caret);
+        }
+    }
+    #[test]
+    fn fenced_navigation_skips_structure_and_preserves_body_boundaries() {
+        let source = "앞\n\n```java\n한😀\n```\n\n뒤";
+        let open = source.find("```java").unwrap();
+        let body = source.find("한😀").unwrap();
+        let body_end = body + "한😀".len();
+        let close = source.rfind("\n```").unwrap() + 1;
+        assert_eq!(fenced_caret(source, body - 1, true), Some("앞".len()));
+        assert_eq!(fenced_caret(source, open + 1, false), Some(body));
+        assert_eq!(fenced_caret(source, body, true), None);
+        assert_eq!(fenced_caret(source, body_end, false), None);
+        assert_eq!(fenced_caret(source, close + 1, true), Some(body_end));
+        assert_eq!(
+            fenced_caret(source, close + 1, false),
+            Some(source.find('뒤').unwrap())
+        );
+        let source = "```java\nX\n```";
+        assert_eq!(fenced_caret(source, 7, true), Some(8));
+        assert_eq!(fenced_caret(source, source.len() - 1, false), Some(9));
+        assert_eq!(fenced_caret("```java", 3, false), None);
+        assert_eq!(fenced_caret("한글", 1, false), None);
+    }
+}

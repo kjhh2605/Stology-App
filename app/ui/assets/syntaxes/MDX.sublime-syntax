@@ -1,0 +1,34 @@
+%YAML 1.2
+---
+# Stology adapter: Markdown prose plus TypeScript/JSX expressions.
+# This is an independent grammar, not a conversion of Sublime MDX v2.
+name: MDX
+scope: text.html.markdown.mdx
+file_extensions: [mdx]
+contexts:
+  main:
+    - match: '^\s*(?=(?:import|export)\b)'
+      push:
+        - meta_scope: source.tsx
+        - match: '$'
+          pop: true
+        - include: scope:source.tsx
+    - include: expression-start
+    - match: '(?=</?[A-Za-z])'
+      push:
+        - meta_scope: source.tsx
+        - match: '(?<=\>)'
+          pop: true
+        - include: scope:source.tsx
+    - include: scope:text.html.markdown
+  expression-start:
+    - match: '\{'
+      scope: punctuation.section.braces.begin.tsx
+      push: expression
+  expression:
+    - meta_scope: source.tsx
+    - match: '\}'
+      scope: punctuation.section.braces.end.tsx
+      pop: true
+    - include: expression-start
+    - include: scope:source.tsx

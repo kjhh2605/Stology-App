@@ -1,0 +1,22 @@
+[package]
+name = "stology-local"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+stology-core = { path = "../core" }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSTimer", "NSRunLoop", "NSString", "NSArray", "NSDictionary", "NSGeometry", "NSNotification", "NSThread", "NSValue"] }
+objc2-app-kit = "0.3"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+libc = "0.2"
+pulldown-cmark = "0.13"
+sha2 = "0.10"
+tempfile = "3"
+syntect = { version = "5.3", default-features = false, features = ["parsing", "default-themes", "regex-onig", "yaml-load"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-onig"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

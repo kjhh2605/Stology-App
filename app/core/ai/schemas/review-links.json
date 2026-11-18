@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reviews"],
+  "properties": {
+    "reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["link", "verdict"],
+        "properties": {
+          "link": {"type": "string"},
+          "verdict": {"type": "string", "enum": ["supported", "unsupported"]}
+        }
+      }
+    }
+  }
+}

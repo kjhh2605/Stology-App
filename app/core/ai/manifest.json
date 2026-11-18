@@ -1,0 +1,10 @@
+{
+  "bundle_version": "1",
+  "skills": {
+    "extract-material": {"version": "1", "schema": "schemas/extract-material.json", "default_tier": "balanced", "min_tier": "fast"},
+    "align-concepts": {"version": "1", "schema": "schemas/align-concepts.json", "default_tier": "precise", "min_tier": "balanced"},
+    "connect-concepts": {"version": "1", "schema": "schemas/connect-concepts.json", "default_tier": "precise", "min_tier": "balanced"},
+    "review-links": {"version": "1", "schema": "schemas/review-links.json", "default_tier": "precise", "min_tier": "balanced"},
+    "distill-chat": {"version": "1", "schema": "schemas/distill-chat.json", "default_tier": "balanced", "min_tier": "fast"}
+  }
+}

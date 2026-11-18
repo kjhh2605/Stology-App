@@ -1,0 +1,27 @@
+{
+  "chunk": {"max_pages": 24, "max_chars": 60000},
+  "extract": {"max_concepts_per_chunk": 24},
+  "checks": {
+    "evidence_drop_rate": 0.3,
+    "link_drop_rate": 0.3,
+    "related_per_concept": 3,
+    "inferred_links_per_concept": 8
+  },
+  "batch": {"align_pairs": 60, "connect_concepts": 300, "review_links": 80},
+  "timeouts_sec": {"extract": 600, "align": 600, "connect": 900, "review": 600, "distill": 300},
+  "modes": {
+    "auto": {"extract": "balanced", "align": "precise", "connect": "precise", "review": null, "distill": "balanced"},
+    "fast": {"extract": "fast", "align": "balanced", "connect": "balanced", "review": null, "distill": "balanced"},
+    "thorough": {"extract": "precise", "align": "precise", "connect": "precise", "review": "precise", "distill": "balanced"}
+  },
+  "distill": {
+    "min_answer_chars": 400,
+    "repeat_similarity": 0.8,
+    "topic_run": 3,
+    "max_notes": 3,
+    "quiet_minutes": 5,
+    "narrow_window": 10,
+    "narrow_min_registered": 3
+  },
+  "background_daily": {"low": 5, "normal": 20, "high": 50}
+}

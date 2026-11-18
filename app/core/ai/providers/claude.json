@@ -1,0 +1,7 @@
+{
+  "tiers": {
+    "precise": {"prefer": [{"family": "opus"}], "effort": ["high", "medium"]},
+    "balanced": {"prefer": [{"family": "sonnet"}], "effort": ["medium", "low"]},
+    "fast": {"prefer": [{"family": "haiku"}], "effort": ["low"]}
+  }
+}

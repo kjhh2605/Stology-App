@@ -1,0 +1,456 @@
+{
+  "reference": "app/docs/keyboard-shortcuts.md",
+  "scope": "curated-core-features",
+  "selectionReason": "사용자 요청에 따라 핵심 작성·서식·PDF 기능만 소개한다. 앱 단축키 문서의 전체 행을 수록하는 범위가 아니다.",
+  "noteEntryCount": 16,
+  "pdfEntryCount": 13,
+  "numbering": "노트와 PDF 각각 1부터 연속 번호를 부여한다.",
+  "intentionalExclusions": [
+    "실행 취소·다시 실행, 복사·붙여넣기·잘라내기, 전체 선택·저장 등 기본 명령",
+    "화살표 자동 변환, Enter로 인용 나가기, 줄 이동·목록 들여쓰기 등 세부 입력 동작",
+    "같은 기능을 별도 항목으로 중복 나열하지 않는다. 단축키와 Markdown 입력법은 한 항목에 함께 표시한다.",
+    "PDF 열기·읽기·저장 상태 등 기본 조작과 보충 안내"
+  ],
+  "verificationScope": "선별 항목의 순서·연속 번호·근거 위치를 기록한다. 실제 앱 기능 전체 범위 또는 브라우저·앱 실기 검증 결과를 뜻하지 않는다.",
+  "shortcuts": [
+    {
+      "number": 1,
+      "id": "bold",
+      "label": "굵게",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 47
+      }
+    },
+    {
+      "number": 2,
+      "id": "italic",
+      "label": "기울임",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 48
+      }
+    },
+    {
+      "number": 3,
+      "id": "underline",
+      "label": "밑줄",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 49
+      }
+    },
+    {
+      "number": 4,
+      "id": "strikethrough",
+      "label": "취소선",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 50
+      }
+    },
+    {
+      "number": 5,
+      "id": "inline-code",
+      "label": "인라인 코드",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 51
+      }
+    },
+    {
+      "number": 6,
+      "id": "link",
+      "label": "선택한 글에 링크",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 52
+      }
+    },
+    {
+      "number": 7,
+      "id": "block-1",
+      "label": "제목 1",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 67
+      }
+    },
+    {
+      "number": 8,
+      "id": "block-2",
+      "label": "제목 2",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 68
+      }
+    },
+    {
+      "number": 9,
+      "id": "block-3",
+      "label": "제목 3",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 69
+      }
+    },
+    {
+      "number": 10,
+      "id": "checklist",
+      "label": "체크리스트",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 70
+      }
+    },
+    {
+      "number": 11,
+      "id": "bullet",
+      "label": "불릿 목록",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 71
+      }
+    },
+    {
+      "number": 12,
+      "id": "numbered",
+      "label": "번호 목록",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 72
+      }
+    },
+    {
+      "number": 13,
+      "id": "block-code",
+      "label": "코드 블록",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 73
+      }
+    },
+    {
+      "number": 14,
+      "id": "markdown-quote",
+      "label": "인용 직접 입력",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 134
+      }
+    },
+    {
+      "number": 15,
+      "id": "selection",
+      "label": "선택 범위 확장",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 19
+      }
+    },
+    {
+      "number": 16,
+      "id": "map-search-focus",
+      "label": "지도 검색창으로 이동",
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 56
+      }
+    }
+  ],
+  "pdfTools": [
+    {
+      "number": 1,
+      "id": "highlight",
+      "label": "본문 텍스트 강조",
+      "source": {
+        "path": "app/ui/src/pdf_annotations.rs",
+        "line": 1094
+      }
+    },
+    {
+      "number": 2,
+      "id": "pdf-area-highlight",
+      "label": "영역 강조",
+      "source": {
+        "path": "app/ui/src/pdf_annotations.rs",
+        "line": 915
+      }
+    },
+    {
+      "number": 3,
+      "id": "pdf-box",
+      "label": "박스 그리기",
+      "source": {
+        "path": "app/ui/src/pdf_annotations.rs",
+        "line": 916
+      }
+    },
+    {
+      "number": 4,
+      "id": "text-note",
+      "label": "메모 남기기",
+      "source": {
+        "path": "app/ui/src/pdf_annotations.rs",
+        "line": 917
+      }
+    },
+    {
+      "number": 5,
+      "id": "pen",
+      "label": "펜으로 자유 필기",
+      "source": {
+        "path": "app/ui/src/pdf_annotations.rs",
+        "line": 918
+      }
+    },
+    {
+      "number": 6,
+      "id": "pdf-move",
+      "label": "필기 옮기기",
+      "source": {
+        "path": "app/ui/src/pdf_annotations.rs",
+        "line": 1002
+      }
+    },
+    {
+      "number": 7,
+      "id": "pdf-resize",
+      "label": "필기 크기 조절",
+      "source": {
+        "path": "app/ui/src/pdf_annotations.rs",
+        "line": 904
+      }
+    },
+    {
+      "number": 8,
+      "id": "pdf-area-select",
+      "label": "여러 필기 함께 선택",
+      "source": {
+        "path": "app/ui/src/pdf_annotations.rs",
+        "line": 686
+      }
+    },
+    {
+      "number": 9,
+      "id": "pdf-note-edit",
+      "label": "메모 다시 고치기",
+      "source": {
+        "path": "app/ui/src/pdf_annotations.rs",
+        "line": 899
+      }
+    },
+    {
+      "number": 10,
+      "id": "pdf-delete-many",
+      "label": "여러 필기 한 번에 삭제",
+      "source": {
+        "path": "app/ui/src/pdf_annotations.rs",
+        "line": 1055
+      }
+    },
+    {
+      "number": 11,
+      "id": "pdf-share",
+      "label": "최신 PDF 공유",
+      "source": {
+        "path": "app/ui/src/main.rs",
+        "line": 1840
+      }
+    },
+    {
+      "number": 12,
+      "id": "pdf-pptx",
+      "label": "PPTX를 PDF로 필기",
+      "source": {
+        "path": "app/ui/src/document_tree.rs",
+        "line": 586
+      }
+    },
+    {
+      "number": 13,
+      "id": "pdf-analyze",
+      "label": "필기한 PDF 분석",
+      "source": {
+        "path": "app/ui/src/main.rs",
+        "line": 2268
+      }
+    }
+  ],
+  "markdownInputs": [
+    {
+      "id": "bold",
+      "keyAlternatives": [
+        [
+          "**텍스트**"
+        ],
+        [
+          "__텍스트__"
+        ]
+      ],
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 137
+      }
+    },
+    {
+      "id": "italic",
+      "keyAlternatives": [
+        [
+          "*텍스트*"
+        ],
+        [
+          "_텍스트_"
+        ]
+      ],
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 138
+      }
+    },
+    {
+      "id": "strikethrough",
+      "keyAlternatives": [
+        [
+          "~~텍스트~~"
+        ]
+      ],
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 139
+      }
+    },
+    {
+      "id": "inline-code",
+      "keyAlternatives": [
+        [
+          "`텍스트`"
+        ]
+      ],
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 51
+      }
+    },
+    {
+      "id": "link",
+      "keyAlternatives": [
+        [
+          "[이름](https://example.com)"
+        ]
+      ],
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 140
+      }
+    },
+    {
+      "id": "block-1",
+      "keyAlternatives": [
+        [
+          "#",
+          "Space"
+        ]
+      ],
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 133
+      }
+    },
+    {
+      "id": "block-2",
+      "keyAlternatives": [
+        [
+          "##",
+          "Space"
+        ]
+      ],
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 133
+      }
+    },
+    {
+      "id": "block-3",
+      "keyAlternatives": [
+        [
+          "###",
+          "Space"
+        ]
+      ],
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 133
+      }
+    },
+    {
+      "id": "checklist",
+      "keyAlternatives": [
+        [
+          "- [ ]",
+          "Space"
+        ],
+        [
+          "- [x]",
+          "Space"
+        ]
+      ],
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 131
+      }
+    },
+    {
+      "id": "bullet",
+      "keyAlternatives": [
+        [
+          "-",
+          "Space"
+        ],
+        [
+          "*",
+          "Space"
+        ],
+        [
+          "+",
+          "Space"
+        ]
+      ],
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 129
+      }
+    },
+    {
+      "id": "numbered",
+      "keyAlternatives": [
+        [
+          "1.",
+          "Space"
+        ]
+      ],
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 130
+      }
+    },
+    {
+      "id": "block-code",
+      "keyAlternatives": [
+        [
+          "```",
+          "python",
+          "Enter"
+        ],
+        [
+          "```\n코드\n```"
+        ]
+      ],
+      "source": {
+        "path": "app/docs/keyboard-shortcuts.md",
+        "line": 136
+      }
+    }
+  ],
+  "markdownInputNote": "코드 블록의 직접 입력은 백틱 세 개·언어 이름 뒤 Enter다. 코드 앞뒤의 백틱 세 개는 각각 독립된 줄에 두는 Markdown 원문 예시다. 밑줄·선택 확장·지도 검색에는 별도의 Markdown 입력법을 표시하지 않는다. 인용은 대표 입력 > + Space만 표시하고 별칭은 추가하지 않는다."
+}

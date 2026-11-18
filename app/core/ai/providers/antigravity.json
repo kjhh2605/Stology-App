@@ -1,0 +1,7 @@
+{
+  "tiers": {
+    "precise": {"prefer": [{"family": "pro"}, {"default": true}], "effort": ["high"]},
+    "balanced": {"prefer": [{"family": "pro"}, {"family": "flash"}, {"default": true}], "effort": ["medium", "low"]},
+    "fast": {"prefer": [{"family": "flash"}, {"default": true}], "effort": ["low"]}
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["notes", "skipped_reason"],
+  "properties": {
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "kind", "body", "concepts", "turns"],
+        "properties": {
+          "title": {"type": "string"},
+          "kind": {"type": "string", "enum": ["concept", "howto", "comparison", "qa"]},
+          "body": {"type": "string"},
+          "concepts": {"type": "array", "items": {"type": "string"}},
+          "turns": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "skipped_reason": {"type": "string"}
+  }
+}

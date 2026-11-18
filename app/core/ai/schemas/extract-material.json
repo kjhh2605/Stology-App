@@ -1,0 +1,72 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["concepts", "relations", "assertions"],
+  "properties": {
+    "concepts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "aliases", "definition", "type"],
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "aliases": {"type": "array", "items": {"type": "string"}},
+          "definition": {"type": "string"},
+          "type": {"type": "string", "enum": ["concept", "principle", "formula", "procedure", "example", "person_event"]}
+        }
+      }
+    },
+    "relations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label", "definition", "directed", "aliases", "type"],
+        "properties": {
+          "id": {"type": "string"},
+          "label": {"type": "string"},
+          "definition": {"type": "string"},
+          "directed": {"type": "boolean"},
+          "aliases": {"type": "array", "items": {"type": "string"}},
+          "type": {"type": "string", "enum": ["kind_of", "part_of", "prerequisite", "cause", "contrast", "example", "applies", "related"]}
+        }
+      }
+    },
+    "assertions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["subject", "relation", "object", "condition", "negated", "evidence"],
+        "properties": {
+          "subject": {"type": "string"},
+          "relation": {"type": "string"},
+          "object": {"type": "string"},
+          "condition": {"type": "string"},
+          "negated": {"type": "boolean"},
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["locator", "quote", "image_path", "region"],
+              "properties": {
+                "locator": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind", "index"],
+                  "properties": {"kind": {"type": "string"}, "index": {"type": "integer"}}
+                },
+                "quote": {"type": "string"},
+                "image_path": {"type": ["string", "null"]},
+                "region": {"type": ["array", "null"], "items": {"type": "number"}}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
