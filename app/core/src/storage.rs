@@ -74,6 +74,7 @@ pub(crate) fn connect(root: &Path) -> Result<Connection> {
       CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),title TEXT NOT NULL,path TEXT,kind TEXT NOT NULL,version INTEGER NOT NULL,hash TEXT NOT NULL,body TEXT NOT NULL DEFAULT '',deleted INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE UNIQUE INDEX IF NOT EXISTS live_paths ON documents(workspace_id,path) WHERE deleted=0 AND path IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS draft_custom_titles(document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE);
       CREATE TABLE IF NOT EXISTS source_versions(document_id TEXT NOT NULL,hash TEXT NOT NULL,path TEXT NOT NULL,version INTEGER NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(document_id,hash));")?;
     let has_origin = c.prepare("PRAGMA table_info(documents)")?.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|n| n == "origin_kind");
     if !has_origin {
@@ -832,6 +833,19 @@ pub fn handle(root: &Path, request: &Value) -> Result<Value> {
                 value(root, &tx, &d)?
             }
         }
+        "draft.rename" => {
+            let mut d = document(&tx, required(request, "id")?)?;
+            anyhow::ensure!(d.kind == "draft", "초안이 아닙니다");
+            expected(request, &d)?;
+            let title = required(request, "title")?.trim();
+            anyhow::ensure!(!title.is_empty(), "제목을 입력하세요");
+            d.title = title.to_owned();
+            d.version += 1;
+            tx.execute("UPDATE documents SET title=?2,version=?3,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                params![d.id, d.title, d.version])?;
+            tx.execute("INSERT OR IGNORE INTO draft_custom_titles(document_id) VALUES(?1)", [&d.id])?;
+            value(root, &tx, &d)?
+        }
         "draft.update" => {
             let mut d = document(&tx, required(request, "id")?)?;
             if d.kind != "draft" {
@@ -847,7 +861,13 @@ pub fn handle(root: &Path, request: &Value) -> Result<Value> {
                 json!({"empty":true,"id":null,"deleted_id":d.id,"version":0,"kind":"draft"})
             } else {
                 d.body = body.into();
-                d.title = draft_title(body);
+                let custom_title: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM draft_custom_titles WHERE document_id=?1)",
+                    [&d.id], |row| row.get(0),
+                )?;
+                if !custom_title {
+                    d.title = draft_title(body);
+                }
                 d.hash = digest(body.as_bytes());
                 d.version += 1;
                 tx.execute("UPDATE documents SET body=?2,title=?3,hash=?4,version=?5,updated_at=CURRENT_TIMESTAMP WHERE id=?1",params![d.id,d.body,d.title,d.hash,d.version])?;
@@ -1248,6 +1268,18 @@ mod tests {
             json!([])
         );
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+    #[test]
+    fn renamed_draft_keeps_title_after_autosave() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let d = draft(root, &ws(root), "first");
+        let rename = json!({"op":"draft.rename","id":d["id"],"expected_version":d["version"],"title":"custom"});
+        let renamed = call(root, rename.clone());
+        assert_eq!(renamed["body"], "first");
+        assert!(handle(root, &rename).is_err());
+        let updated = call(root, json!({"op":"draft.update","id":d["id"],"expected_version":renamed["version"],"body":"second"}));
+        assert_eq!(updated["title"], "custom");
     }
     #[test]
     fn empty_drafts_never_accumulate() {
