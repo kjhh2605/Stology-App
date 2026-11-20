@@ -174,6 +174,14 @@ pub fn settings(root: &Path) -> Value {
     }
     v
 }
+pub const PRESETS: [&str; 6] = ["custom", "codex-plus", "codex-pro", "claude-pro", "claude-max", "claude-ultra"];
+
+pub fn helper_provider<'a>(settings: &'a Value, stage: &str, fallback: &'a str) -> &'a str {
+    let preset = settings["helper_preset"].as_str().unwrap_or("custom");
+    if preset != "custom" { return preset.split('-').next().unwrap_or(fallback); }
+    settings["helper_models"][stage]["provider"].as_str().unwrap_or(fallback)
+}
+
 fn set_settings(root: &Path, req: &Value) -> Result<Value> {
     let mut v = settings(root);
     if let Some(mode) = req.get("organize_mode") {
@@ -191,6 +199,22 @@ fn set_settings(root: &Path, req: &Value) -> Result<Value> {
     if let Some(provider) = req.get("organize_provider") {
         anyhow::ensure!(provider.as_str().is_some_and(|p| ["codex", "claude", "antigravity"].contains(&p)), "지원하지 않는 공급자");
         v["organize_provider"] = provider.clone();
+    }
+    if let Some(preset) = req.get("helper_preset") {
+        anyhow::ensure!(preset.as_str().is_some_and(|p| PRESETS.contains(&p)), "잘못된 도우미 프리셋");
+        v["helper_preset"] = preset.clone();
+        if preset != "custom" {
+            v["organize_provider"] = json!(preset.as_str().unwrap().split('-').next().unwrap());
+        }
+    }
+    if let Some(choice) = req.get("helper_model") {
+        let stage = choice["stage"].as_str().filter(|s| STAGES.contains(s)).context("잘못된 단계")?;
+        let provider = choice["provider"].as_str().filter(|p| ["codex", "claude", "antigravity"].contains(p)).context("공급자 없음")?;
+        let model = choice["model"].as_str().context("모델 없음")?;
+        anyhow::ensure!(model.len() <= 128 && model.chars().all(|c| c.is_ascii_alphanumeric() || "-_.[]".contains(c)), "잘못된 모델 ID");
+        if !v["helper_models"].is_object() { v["helper_models"] = json!({}); }
+        v["helper_models"][stage] = json!({"provider":provider,"model":model,"effort":""});
+        v["helper_preset"] = json!("custom");
     }
     // {"provider":"codex","stage":"extract","model":"gpt-…","effort":"high"}; an empty model clears the override.
     if let Some(choice) = req.get("stage_model") {
@@ -304,22 +328,49 @@ pub fn highest(tiers: &Value) -> Option<(&'static str, Value)> {
 /// What each stage of a run will use: requested tier, the tier and model actually
 /// available, and a note when the account forced a lower tier.
 pub fn stage_plan(root: &Path, provider: &str, mode: &str, catalog: &[Value]) -> Result<Value> {
+    stage_plan_for(root, provider, mode, catalog, &STAGES)
+}
+
+pub fn stage_plan_for(root: &Path, provider: &str, mode: &str, catalog: &[Value], included: &[&str]) -> Result<Value> {
+    let mut catalogs = std::collections::HashMap::new();
+    catalogs.insert(provider.to_owned(), catalog.to_vec());
+    stage_plan_catalogs(root, provider, mode, catalogs, included)
+}
+
+fn stage_plan_catalogs(root: &Path, provider: &str, mode: &str, mut catalogs: std::collections::HashMap<String, Vec<Value>>, included: &[&str]) -> Result<Value> {
     anyhow::ensure!(MODES.contains(&mode), "잘못된 정리 방식");
     let routing = routing(root)?;
-    let tiers = tier_models(provider, catalog)?;
-    let overrides = settings(root)["stage_models"][provider].clone();
+    let settings = settings(root);
+    let preset = settings["helper_preset"].as_str().unwrap_or("custom");
+    let tiers = tier_models(provider, &catalogs[provider])?;
     let manifest = manifest()?;
     let mut stages = Map::new();
     for stage in STAGES {
+        if !included.contains(&stage) { continue; }
         let requested = routing["modes"][mode][stage].as_str();
         let Some(requested) = requested else {
             stages.insert(stage.into(), Value::Null);
             continue;
         };
         anyhow::ensure!(TIERS.contains(&requested), "routing.json의 modes.{mode}.{stage} 값이 올바르지 않습니다");
+        let stage_provider = helper_provider(&settings, stage, provider);
+        if !catalogs.contains_key(stage_provider) {
+            let result = crate::chat::handle(root, &json!({"op":"chat.models","provider":stage_provider}))?;
+            catalogs.insert(stage_provider.to_owned(), result["models"].as_array().cloned().unwrap_or_default());
+        }
+        let catalog = &catalogs[stage_provider];
+        let tiers = tier_models(stage_provider, catalog)?;
+        let requested = match preset {
+            "codex-plus" | "claude-pro" if requested == "precise" => "balanced",
+            "claude-ultra" => "precise",
+            _ => requested,
+        };
+        let overrides = if preset != "custom" { Value::Null }
+            else if settings["helper_models"][stage].is_object() { json!({stage:settings["helper_models"][stage]}) }
+            else { settings["stage_models"][stage_provider].clone() };
         let min = manifest["skills"][stage_skill(stage)]["min_tier"].as_str().unwrap_or("fast");
         let chosen = overrides[stage]["model"].as_str().filter(|m| !m.is_empty());
-        let entry = if let Some(model) = chosen {
+        let mut entry = if let Some(model) = chosen {
             anyhow::ensure!(catalog.iter().any(|m| m["id"] == model), "직접 고른 {stage} 모델 {model}이(가) 현재 계정의 목록에 없습니다. AI 정리 설정에서 다시 골라 주세요.");
             json!({"requested":requested,"tier":"custom","model":model,"effort":overrides[stage]["effort"].as_str().unwrap_or(""),"note":"직접 고른 모델","below_min":false})
         } else {
@@ -329,6 +380,8 @@ pub fn stage_plan(root: &Path, provider: &str, mode: &str, catalog: &[Value]) ->
             let note = if tier == requested { String::new() } else { format!("계정에 {} 등급 모델이 없어 {} 등급으로 진행해요", tier_label(requested), tier_label(tier)) };
             json!({"requested":requested,"tier":tier,"model":model["model"],"effort":model["effort"],"note":note,"below_min":tier_rank(tier) < tier_rank(min)})
         };
+        entry["provider"] = json!(stage_provider);
+        entry["tiers"] = tiers;
         stages.insert(stage.into(), entry);
     }
     Ok(json!({"provider":provider,"mode":mode,"tiers":tiers,"stages":stages}))
@@ -437,6 +490,20 @@ pub fn handle(root: &Path, req: &Value) -> Result<Value> {
         "ai.skills.reset" => reset_copy(root),
         "ai.settings.get" => Ok(json!({"settings":settings(root),"usage":usage_summary(root),"routing":routing(root).unwrap_or(Value::Null)})),
         "ai.settings.set" => Ok(json!({"settings":set_settings(root, req)?})),
+        "ai.helper_catalog" => {
+            let mut models = Vec::new();
+            let mut errors = Vec::new();
+            for provider in ["codex", "claude", "antigravity"] {
+                match crate::chat::handle(root, &json!({"op":"chat.models","provider":provider})) {
+                    Ok(result) => for mut model in result["models"].as_array().cloned().unwrap_or_default() {
+                        model["provider"] = json!(provider);
+                        models.push(model);
+                    },
+                    Err(error) => errors.push(format!("{provider}: {error}")),
+                }
+            }
+            Ok(json!({"models":models,"errors":errors}))
+        }
         "ai.tiers" => {
             let provider = req["provider"].as_str().context("공급자 없음")?;
             let catalog = crate::chat::handle(root, &json!({"op":"chat.models","provider":provider}))?;
@@ -453,6 +520,39 @@ pub fn handle(root: &Path, req: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mixed_helpers_preserve_provider_and_custom_choices_across_presets() {
+        let d = tempfile::tempdir().unwrap();
+        set_settings(d.path(), &json!({"helper_model":{"stage":"extract","provider":"codex","model":"gpt-6.1-sol"}})).unwrap();
+        set_settings(d.path(), &json!({"helper_model":{"stage":"align","provider":"claude","model":"claude-sonnet-4-5"}})).unwrap();
+        let catalogs = std::collections::HashMap::from([
+            ("codex".into(), codex_catalog()),
+            ("claude".into(), vec![json!({"id":"claude-sonnet-4-5","label":"Sonnet"})]),
+        ]);
+        let plan = stage_plan_catalogs(d.path(), "codex", "auto", catalogs.clone(), &STAGES).unwrap();
+        assert_eq!(plan["stages"]["extract"]["provider"], "codex");
+        assert_eq!(plan["stages"]["align"]["provider"], "claude");
+        assert_eq!(plan["stages"]["align"]["model"], "claude-sonnet-4-5");
+        set_settings(d.path(), &json!({"helper_preset":"codex-plus"})).unwrap();
+        let plus = stage_plan_catalogs(d.path(), "codex", "auto", catalogs.clone(), &STAGES).unwrap();
+        assert_eq!(plus["stages"]["align"]["provider"], "codex");
+        assert_eq!(plus["stages"]["align"]["tier"], "balanced");
+        assert!(plus["stages"]["review"].is_null());
+        set_settings(d.path(), &json!({"helper_preset":"custom"})).unwrap();
+        let restored = stage_plan_catalogs(d.path(), "codex", "auto", catalogs, &STAGES).unwrap();
+        assert_eq!(restored["stages"], plan["stages"]);
+        assert!(set_settings(d.path(), &json!({"helper_preset":"unknown"})).is_err());
+    }
+
+    #[test]
+    fn distill_does_not_resolve_unrelated_helpers() {
+        let d = tempfile::tempdir().unwrap();
+        set_settings(d.path(), &json!({"helper_model":{"stage":"align","provider":"claude","model":"missing"}})).unwrap();
+        let plan = stage_plan_for(d.path(), "codex", "auto", &codex_catalog(), &["distill"]).unwrap();
+        assert_eq!(plan["stages"].as_object().unwrap().len(), 1);
+        assert_eq!(plan["stages"]["distill"]["provider"], "codex");
+    }
+
     fn codex_catalog() -> Vec<Value> {
         vec![
             json!({"id":"gpt-6.1-sol","label":"GPT-6.1-Sol","default":true,"efforts":["low","medium","high"]}),

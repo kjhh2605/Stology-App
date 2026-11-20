@@ -126,7 +126,7 @@ fn provider_for(root: &Path, req: &Value) -> Result<String> {
     let remembered = if req["single"] == true { selected.or(saved) } else { saved.or(selected) };
     let p = req["provider"].as_str().map(str::to_owned).or(remembered).context("먼저 AI 공급자를 연결해 주세요")?;
     anyhow::ensure!(["codex", "claude", "antigravity"].contains(&p.as_str()), "지원하지 않는 공급자");
-    Ok(p)
+    Ok(skills::helper_provider(&skills::settings(root), "extract", &p).to_owned())
 }
 fn usage_label(calls: usize) -> &'static str {
     match calls {
@@ -176,10 +176,10 @@ fn plan(root: &Path, req: &Value) -> Result<Value> {
         anyhow::ensure!(targets == ids.len(), "{}", materials.iter().find_map(|m| m["unreadable"].as_str()).unwrap_or("선택한 자료를 찾을 수 없습니다"));
     }
     let catalog = crate::chat::handle(root, &json!({"op":"chat.models","provider":provider}))?["models"].as_array().cloned().unwrap_or_default();
-    let mut stages = skills::stage_plan(root, &provider, &mode, &catalog)?;
-    if reread {
+    let mut stages = skills::stage_plan_for(root, &provider, &mode, &catalog, if single { &["extract"] } else { &["extract", "align", "connect", "review"] })?;
+    if reread && stages["stages"]["extract"]["tier"] != "custom" {
         if let Some((tier, model)) = skills::highest(&stages["tiers"]) {
-            stages["stages"]["extract"] = json!({"requested":tier,"tier":tier,"model":model["model"],"effort":model["effort"],"note":"이 자료만 가장 높은 등급으로 다시 읽어요","below_min":false});
+            stages["stages"]["extract"] = json!({"provider":provider,"tiers":stages["tiers"],"requested":tier,"tier":tier,"model":model["model"],"effort":model["effort"],"note":"이 자료만 가장 높은 등급으로 다시 읽어요","below_min":false});
         }
     }
     let structure = !single;
@@ -468,7 +468,10 @@ fn wait_turn(ctx: &Ctx) -> Result<crate::chat::ExecutionLock> {
         thread::sleep(Duration::from_millis(300));
     }
 }
+#[derive(Clone)]
 struct Choice {
+    provider: String,
+    tiers: Value,
     requested: String,
     tier: String,
     model: String,
@@ -476,14 +479,15 @@ struct Choice {
 }
 fn choice(stage: &Value) -> Choice {
     let text = |k: &str| stage[k].as_str().unwrap_or("").to_owned();
-    Choice { requested: text("requested"), tier: text("tier"), model: text("model"), effort: text("effort") }
+    Choice { provider: text("provider"), tiers: stage["tiers"].clone(), requested: text("requested"), tier: text("tier"), model: text("model"), effort: text("effort") }
 }
 /// The next tier up for a second try, when the account has one.
 fn step_up(run: &Value, current: &Choice) -> Option<Choice> {
     if current.tier == "custom" {
         return None;
     }
-    skills::tier_above(&run["tiers"], &current.tier, &current.model).map(|(tier, m)| Choice {
+    skills::tier_above(if current.tiers.is_object() { &current.tiers } else { &run["tiers"] }, &current.tier, &current.model).map(|(tier, m)| Choice {
+        provider: current.provider.clone(), tiers: current.tiers.clone(),
         requested: current.requested.clone(),
         tier: tier.to_owned(),
         model: m["model"].as_str().unwrap_or("").to_owned(),
@@ -494,7 +498,8 @@ fn top(run: &Value, current: &Choice) -> Option<Choice> {
     if current.tier == "custom" {
         return None;
     }
-    skills::highest(&run["tiers"]).filter(|(_, m)| m["model"] != current.model.as_str()).map(|(tier, m)| Choice {
+    skills::highest(if current.tiers.is_object() { &current.tiers } else { &run["tiers"] }).filter(|(_, m)| m["model"] != current.model.as_str()).map(|(tier, m)| Choice {
+        provider: current.provider.clone(), tiers: current.tiers.clone(),
         requested: current.requested.clone(),
         tier: tier.to_owned(),
         model: m["model"].as_str().unwrap_or("").to_owned(),
@@ -504,10 +509,11 @@ fn top(run: &Value, current: &Choice) -> Option<Choice> {
 /// One skill call, or its kept result. Returns the outcome and the step record.
 #[allow(clippy::too_many_arguments)]
 fn call(ctx: &Ctx, skill: &Skill, stage: &str, c: &Choice, input: &Value, images: &[(PathBuf, String)], attempt: usize, why: &str) -> (Result<Value>, Value) {
+    let provider = if c.provider.is_empty() { ctx.provider.as_str() } else { c.provider.as_str() };
     let text = input.to_string();
-    let key = skills::digest(format!("{}|{}|{}|{}|{}|{attempt}", skill.fingerprint, ctx.provider, c.model, c.effort, skills::digest(text.as_bytes())).as_bytes());
+    let key = skills::digest(format!("{}|{}|{}|{}|{}|{attempt}", skill.fingerprint, provider, c.model, c.effort, skills::digest(text.as_bytes())).as_bytes());
     let kept = ctx.root.join("ai/cache").join(format!("{key}.json"));
-    let mut record = json!({"stage":stage,"skill":skill.name,"requested":c.requested,"tier":c.tier,"model":c.model,"effort":c.effort,"why":why,"key":key});
+    let mut record = json!({"provider":provider,"stage":stage,"skill":skill.name,"requested":c.requested,"tier":c.tier,"model":c.model,"effort":c.effort,"why":why,"key":key});
     if let Ok(saved) = fs::read(&kept).map_err(anyhow::Error::from).and_then(|b| Ok(serde_json::from_slice::<Value>(&b)?)) {
         // A result this run asked for before it stopped is still this run's call, not a reuse.
         if saved["run"] == ctx.run_id.as_str() {
@@ -526,9 +532,9 @@ fn call(ctx: &Ctx, skill: &Skill, stage: &str, c: &Choice, input: &Value, images
         let timeout = Duration::from_secs(ctx.routing["timeouts_sec"][stage].as_u64().unwrap_or(600));
         let out = ctx.dir.join("calls").join(&key);
         // Every attempt uses the subscription, also one that is stopped or fails halfway.
-        let _ = skills::log_usage(ctx.root, "organize", &skill.name, &ctx.provider, &c.model, &ctx.run_id);
+        let _ = skills::log_usage(ctx.root, "organize", &skill.name, provider, &c.model, &ctx.run_id);
         providers::invoke(ctx.root, ctx.job, &out, &Call {
-            provider: &ctx.provider,
+            provider: provider,
             model: (!c.model.is_empty()).then_some(c.model.as_str()),
             effort: &c.effort,
             prompt: &prompt,
@@ -544,7 +550,7 @@ fn call(ctx: &Ctx, skill: &Skill, stage: &str, c: &Choice, input: &Value, images
             record["usage"] = reply.usage.clone();
             let _ = fs::create_dir_all(ctx.root.join("ai/cache"));
             let _ = skills::write_json(&kept, &json!({"result":reply.result,"model":reply.model,"usage":reply.usage,"at":now(),"skill":skill.name,"version":skill.version,"run":ctx.run_id,"seconds":record["seconds"]}));
-            let _ = providers::mark_success(ctx.root, &ctx.provider, ctx.job.file_name().and_then(|n| n.to_str()).unwrap_or(""));
+            let _ = providers::mark_success(ctx.root, provider, ctx.job.file_name().and_then(|n| n.to_str()).unwrap_or(""));
             (Ok(reply.result), record)
         }
         Err(e) => {
@@ -738,7 +744,7 @@ fn read_material(ctx: &Ctx, run: &mut Value, skill: &Skill, mi: usize, of: usize
 /// A step outside reading: call, and call once more a tier up (or again) when
 /// the call fails or `accept` rejects the answer.
 fn step(ctx: &Ctx, run: &mut Value, skill: &Skill, stage: &str, input: &Value, first: &Choice, base_attempt: usize, accept: &dyn Fn(&Value) -> Result<()>) -> Result<Value> {
-    let mut current = Choice { requested: first.requested.clone(), tier: first.tier.clone(), model: first.model.clone(), effort: first.effort.clone() };
+    let mut current = first.clone();
     let mut why = String::new();
     for attempt in 0..2 {
         let (outcome, record) = call(ctx, skill, stage, &current, input, &[], base_attempt + attempt, &why);
@@ -986,13 +992,14 @@ fn pipeline(ctx: &Ctx, run: &mut Value) -> Result<Value> {
                 let quality = if result.low { "low" } else { "ok" };
                 let model = run["materials"][mi]["chunks"].as_array().into_iter().flatten()
                     .filter_map(|c| c["attempts"].as_array().and_then(|a| a.last())).filter_map(|a| a["model"].as_str()).next_back().unwrap_or("").to_owned();
+                let provider = run["stages"]["extract"]["provider"].as_str().unwrap_or(&ctx.provider);
                 knowledge::apply_checked(&scratch, &knowledge::Material {
                     workspace: &w, id: &id, hash: &hash,
                     immutable_path: run["materials"][mi]["immutable_path"].as_str().unwrap_or(""),
                     title: run["materials"][mi]["title"].as_str().unwrap_or(""),
-                    provider: &ctx.provider, model: &model, rules: &rules,
+                    provider, model: &model, rules: &rules,
                 }, &result.analysis)?;
-                scratch.execute("INSERT OR REPLACE INTO ont_material_state VALUES(?1,?2,?3,?4,?5,?6,?7)", params![w, id, hash, quality, ctx.provider, model, ctx.run_id])?;
+                scratch.execute("INSERT OR REPLACE INTO ont_material_state VALUES(?1,?2,?3,?4,?5,?6,?7)", params![w, id, hash, quality, provider, model, ctx.run_id])?;
                 let m = &mut run["materials"][mi];
                 m["state"] = json!("done");
                 m["quality"] = json!(quality);

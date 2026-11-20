@@ -1,12 +1,12 @@
 use crate::{confirm_action, font, mtm, rect, rpc, text_label, theme, view};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{define_class, msg_send, sel, AnyThread, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AnyThread, ClassType, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSButton, NSColor, NSImage, NSImageView, NSLineBreakMode, NSPopUpButton, NSScrollView,
+    NSApplication, NSBackingStoreType, NSButton, NSColor, NSImage, NSImageView, NSLineBreakMode, NSPopUpButton, NSScrollView,
     NSTextField, NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_foundation::{NSData, NSObject, NSObjectProtocol, NSPoint, NSRect, NSString, NSURL};
+use objc2_foundation::{NSData, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSString, NSTimer, NSURL};
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -18,7 +18,7 @@ const HELPER_DOCUMENT_HEIGHT: f64 = 680. + HELPER_VERTICAL_PADDING * 2.;
 const MODES: [&str; 3] = ["auto", "fast", "thorough"];
 const DISTILL: [&str; 3] = ["off", "ask", "auto"];
 const BACKGROUND: [&str; 3] = ["low", "normal", "high"];
-const PROVIDERS: [&str; 3] = ["codex", "claude", "antigravity"];
+const PRESETS: [&str; 6] = ["custom", "codex-plus", "codex-pro", "claude-pro", "claude-max", "claude-ultra"];
 const STAGES: [(&str, &str); 5] = [
     ("extract", "자료 읽기"),
     ("align", "개념 맞추기"),
@@ -38,6 +38,13 @@ define_class!(
     struct AiSettingsTarget;
     unsafe impl NSObjectProtocol for AiSettingsTarget {}
     impl AiSettingsTarget {
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _window: &NSWindow) -> bool {
+            unsafe { NSApplication::sharedApplication(mtm()).stopModal(); }
+            false
+        }
+        #[unsafe(method(settingsTick:))]
+        fn settings_tick(&self, _timer: &NSTimer) { unsafe { tick(); } }
         #[unsafe(method(aiSettingsAction:))]
         fn action(&self, sender: &AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
@@ -56,7 +63,7 @@ define_class!(
 struct StageRow {
     popup: Retained<NSPopUpButton>,
     note: Retained<NSTextField>,
-    models: Vec<String>,
+    models: Vec<(String, String)>,
 }
 
 struct Pending {
@@ -189,26 +196,22 @@ fn automatic_title(tiers: &Value, stage: &Value) -> String {
 impl SettingsWindow {
     unsafe fn new() -> Self {
         let window = NSWindow::initWithContentRect_styleMask_backing_defer(
-            NSWindow::alloc(mtm()), rect(0., 0., 560., 760.),
-            NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+            NSWindow::alloc(mtm()), rect(0., 0., 560., 700.),
+            NSWindowStyleMask::Titled | NSWindowStyleMask::FullSizeContentView,
             NSBackingStoreType::Buffered, false,
         );
         window.setTitle(&NSString::from_str("AI 설정"));
         theme::apply_window(&window);
         window.setReleasedWhenClosed(false);
-        let root = view(rect(0., 0., 560., 760.));
+        let root = view(rect(0., 0., 560., 700.));
         window.setContentView(Some(&root));
         theme::canvas(&root);
-        label(&root, "AI 설정", rect(28., 690., 460., 30.), 24., true);
-        label(&root, "나에게 맞는 정리 방식과 도우미를 골라요", rect(28., 662., 480., 22.), 12., false);
-        let (shell, body) = theme::panel(rect(20., 62., 520., 578.));
-        root.addSubview(&shell);
-        let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm()), rect(0., 0., 520., 578.));
+        let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm()), rect(20., 64., 520., 578.));
         scroll.setHasVerticalScroller(true);
         scroll.setHasHorizontalScroller(false);
         scroll.setAutohidesScrollers(true);
         scroll.setDrawsBackground(false);
-        body.addSubview(&scroll);
+        root.addSubview(&scroll);
         crate::scrollbar::style(&scroll);
         let document = view(rect(0., 0., 500., 578.));
         scroll.setDocumentView(Some(&document));
@@ -218,6 +221,7 @@ impl SettingsWindow {
             upper.addSubview(&theme::soft_divider(rect(0., y, 460., 1.), false));
         }
         let target: Retained<AiSettingsTarget> = msg_send![AiSettingsTarget::alloc(mtm()), init];
+        let _: () = msg_send![&window, setDelegate: &*target];
         label(&upper, "과목 정리 방식", rect(0., 486., 460., 22.), 13., true);
         let mode = popup(&upper, &target, 1, "과목 정리 방식", rect(0., 452., 460., 28.), &["알아서", "빠르게", "꼼꼼하게"]);
         let mode_note = label(&upper, "", rect(0., 424., 460., 24.), 11., false);
@@ -235,28 +239,31 @@ impl SettingsWindow {
         button(&document, &target, 5, "스킬 폴더 열기", rect(20., 28., 170., 30.));
         let reset = button(&document, &target, 6, "기본값으로 되돌리기", rect(206., 28., 220., 30.));
         reset.setEnabled(false);
-        let (track, track_body) = theme::chat_tab_group(rect(280., 690., 252., 32.));
+        let close = button(&root, &target, 11, "닫기", rect(464., 20., 76., 28.));
+        close.setKeyEquivalent(&NSString::from_str("\u{1b}"));
+        crate::hand_cursor::install(&close);
+        let (track, track_body) = theme::chat_tab_group(rect(266., 650., 274., 40.));
         root.addSubview(&track);
-        let tab_selection = theme::chat_tab_selection(rect(3., 3., 120., 26.));
+        let tab_selection = theme::chat_tab_selection(rect(4., 4., 133., 32.));
         track_body.addSubview(&tab_selection);
         let tabs = [
-            button(&track_body, &target, 9, "정리 방식", rect(3., 3., 120., 26.)),
-            button(&track_body, &target, 10, "도우미 설정", rect(129., 3., 120., 26.)),
+            button(&track_body, &target, 9, "정리 방식", rect(4., 4., 133., 32.)),
+            button(&track_body, &target, 10, "도우미 설정", rect(137., 4., 133., 32.)),
         ];
-        theme::glass_button(&tabs[0], theme::Glass::Selected, None, 12.);
-        theme::glass_button(&tabs[1], theme::Glass::Clear, None, 12.);
+        theme::chat_tab(&tabs[0], true, 0);
+        theme::chat_tab(&tabs[1], false, 1);
         tabs[0].setState(1);
         let helpers = NSScrollView::initWithFrame(NSScrollView::alloc(mtm()), scroll.frame());
         helpers.setHasVerticalScroller(true);
         helpers.setAutohidesScrollers(true);
         helpers.setDrawsBackground(false);
-        body.addSubview(&helpers);
+        root.addSubview(&helpers);
         crate::scrollbar::style(&helpers);
         helpers.setHidden(true);
         let advanced = view(rect(0., 0., 500., HELPER_DOCUMENT_HEIGHT));
         helpers.setDocumentView(Some(&advanced));
-        let provider = popup(&advanced, &target, 4, "모델 공급자", rect(20., 662., 160., 28.), &["Codex", "Claude", "Antigravity"]);
-        let load = button(&advanced, &target, 7, "모델 목록 불러오기", rect(188., 662., 180., 28.));
+        let provider = popup(&advanced, &target, 4, "추천 프리셋", rect(20., 662., 230., 28.), &["직접 선택", "Codex / Plus", "Codex / Pro", "Claude / Pro", "Claude / Max", "Claude / Ultra"]);
+        let load = button(&advanced, &target, 7, "모델 목록 불러오기", rect(260., 662., 220., 28.));
         let tiers_status = label(&advanced, "모델 목록을 불러오면 직접 고를 수 있어요", rect(20., 633., 460., 24.), 11., false);
         let roles: [(&str, &str, &[u8]); 5] = [
             ("자료 읽기 도우미", "자료에서 핵심 개념과 근거를 찾아요.", include_bytes!("../../assets/helpers/extract.png")),
@@ -287,7 +294,7 @@ impl SettingsWindow {
             let origin = child.frame().origin;
             child.setFrameOrigin(NSPoint::new(origin.x, origin.y + HELPER_VERTICAL_PADDING - 10.));
         }
-        let status = label(&root, "", rect(28., 8., 504., 46.), 11., false);
+        let status = label(&root, "", rect(28., 8., 416., 46.), 11., false);
         window.center();
         Self {
             window, _target: target, tabs, tab_selection, scroll, helpers, document, upper, mode, mode_note, distill,
@@ -315,7 +322,7 @@ impl SettingsWindow {
     }
 
     fn provider_id(&self) -> &'static str {
-        PROVIDERS.get(self.provider.indexOfSelectedItem() as usize).copied().unwrap_or("codex")
+        self.settings["organize_provider"].as_str().and_then(|p| match p { "claude" => Some("claude"), "antigravity" => Some("antigravity"), "codex" => Some("codex"), _ => None }).unwrap_or("codex")
     }
 
     fn mode_id(&self) -> &str {
@@ -324,6 +331,7 @@ impl SettingsWindow {
 
     unsafe fn render_settings(&self) {
         let ready = self.settings.is_object();
+        select(&self.provider, &PRESETS, Some(self.settings["helper_preset"].as_str().unwrap_or("custom")));
         self.mode.setEnabled(ready);
         self.distill.setEnabled(ready);
         self.background.setEnabled(ready);
@@ -459,42 +467,59 @@ impl SettingsWindow {
         let provider = self.provider_id();
         let mode = self.mode_id().to_owned();
         let request = json!({"op":"ai.tiers","provider":provider,"mode":mode});
+        let custom = self.settings["helper_preset"].as_str().unwrap_or("custom") == "custom";
         let (tx, rx) = mpsc::channel();
         self.pending = Some(Pending { provider, mode, revision: self.tiers_revision, rx });
         self.load.setEnabled(false);
         self.provider.setEnabled(false);
         for row in &self.stages { row.popup.setEnabled(false); }
         self.tiers_status.setStringValue(&NSString::from_str("불러오는 중…"));
-        std::thread::spawn(move || { let _ = tx.send(rpc(request)); });
+        std::thread::spawn(move || {
+            let result = if custom { rpc(json!({"op":"ai.helper_catalog"})) } else { rpc(request) };
+            let _ = tx.send(result);
+        });
     }
 
     unsafe fn render_tiers(&mut self) {
         let Some(result) = self.tiers.as_ref() else { return; };
         let provider = self.provider_id();
+        let custom = self.settings["helper_preset"].as_str().unwrap_or("custom") == "custom";
+        let thorough = self.mode_id() == "thorough";
         for ((stage, _), row) in STAGES.iter().zip(self.stages.iter_mut()) {
             row.popup.removeAllItems();
             row.models.clear();
-            row.models.push(String::new());
-            let info = &result["stages"][*stage];
-            row.popup.addItemWithTitle(&NSString::from_str(&automatic_title(&result["tiers"], info)));
-            for model in result["models"].as_array().into_iter().flatten() {
-                let Some(id) = model["id"].as_str() else { continue; };
-                let title = model["label"].as_str().filter(|title| !title.is_empty()).unwrap_or(id);
-                row.popup.addItemWithTitle(&NSString::from_str(title));
-                row.models.push(id.to_owned());
+            if !custom {
+                let info = &result["stages"][*stage];
+                row.popup.addItemWithTitle(&NSString::from_str(&automatic_title(&result["tiers"], info)));
+                row.popup.selectItemAtIndex(0);
+                row.popup.setEnabled(false);
+                row.note.setStringValue(&NSString::from_str(info["note"].as_str().unwrap_or("추천 구성 · 직접 선택에서 변경할 수 있어요")));
+                continue;
             }
-            let chosen = self.settings["stage_models"][provider][*stage]["model"].as_str().unwrap_or("");
-            let selected = row.models.iter().position(|model| model == chosen);
-            row.popup.selectItemAtIndex(selected.map_or(-1, |index| index as isize));
+            row.popup.addItemWithTitle(&NSString::from_str("정리 방식에 맡김"));
+            row.models.push((provider.into(), String::new()));
+            for model in result["models"].as_array().into_iter().flatten() {
+                let (Some(id), Some(p)) = (model["id"].as_str(), model["provider"].as_str()) else { continue; };
+                if id.is_empty() { continue; }
+                let label = model["label"].as_str().filter(|s| !s.is_empty()).unwrap_or(id);
+                row.popup.addItemWithTitle(&NSString::from_str(&format!("{p} / {label}")));
+                row.models.push((p.to_owned(), id.to_owned()));
+            }
+            let saved = &self.settings["helper_models"][*stage];
+            let legacy = &self.settings["stage_models"][provider][*stage];
+            let chosen_provider = saved["provider"].as_str().unwrap_or(provider);
+            let chosen_model = if saved.is_object() { saved["model"].as_str() } else { legacy["model"].as_str() }.unwrap_or("");
+            let selected = row.models.iter().position(|(p, m)| p == chosen_provider && m == chosen_model);
+            let selected = selected.unwrap_or_else(|| {
+                row.popup.addItemWithTitle(&NSString::from_str(&format!("{chosen_provider} / {chosen_model} (미확인)")));
+                row.models.push((chosen_provider.into(), chosen_model.into()));
+                row.models.len() - 1
+            });
+            row.popup.selectItemAtIndex(selected as isize);
             row.popup.setEnabled(self.pending.is_none());
-            let note = info["note"].as_str().unwrap_or("");
-            let note = if info["below_min"].as_bool() == Some(true) {
-                if note.is_empty() { "이 등급으로는 점선 연결을 만들지 않아요".to_owned() }
-                else { format!("{note} · 이 등급으로는 점선 연결을 만들지 않아요") }
-            } else { note.to_owned() };
-            row.note.setStringValue(&NSString::from_str(&note));
-            let tooltip = NSString::from_str(&note);
-            row.note.setToolTip(if note.is_empty() { None } else { Some(&tooltip) });
+            row.note.setStringValue(&NSString::from_str(if *stage == "review" && !thorough {
+                "꼼꼼하게 정리할 때 사용해요"
+            } else { "공급자가 달라도 도우미별로 자유롭게 고를 수 있어요" }));
         }
     }
 
@@ -517,7 +542,12 @@ impl SettingsWindow {
         match result {
             Ok(result) => {
                 self.tiers = Some(result);
-                self.tiers_status.setStringValue(&NSString::from_str("첫 항목을 고르면 정리 방식에 맡겨요"));
+                let message = if self.settings["helper_preset"].as_str().unwrap_or("custom") == "custom" {
+                    if self.tiers.as_ref().is_some_and(|v| v["errors"].as_array().is_some_and(|e| !e.is_empty())) {
+                        "조회 가능한 공급자만 표시해요 · 구독 계정 연결을 확인해 주세요"
+                    } else { "도우미마다 공급자와 모델을 자유롭게 선택하세요" }
+                } else { "요금제별 추천 구성이에요 · 실제 계정의 모델 목록을 사용해요" };
+                self.tiers_status.setStringValue(&NSString::from_str(message));
                 self.render_tiers();
             }
             Err(error) => {
@@ -552,8 +582,12 @@ impl SettingsWindow {
                 }
             }
             4 => {
-                self.clear_tiers();
-                self.load_tiers();
+                if let Some(preset) = PRESETS.get(selected as usize) {
+                    if self.save(json!({"op":"ai.settings.set","helper_preset":preset})) {
+                        self.clear_tiers();
+                        self.load_tiers();
+                    }
+                }
             }
             5 => {
                 match rpc(json!({"op":"ai.skills.open"})) {
@@ -589,11 +623,10 @@ impl SettingsWindow {
             7 => self.load_tiers(),
             9 | 10 => {
                 let show = tag == 10;
-                self.tab_selection.setFrameOrigin(NSPoint::new(if show { 129. } else { 3. }, 3.));
+                self.tab_selection.setFrameOrigin(NSPoint::new(if show { 137. } else { 4. }, 4.));
                 for (index, tab) in self.tabs.iter().enumerate() {
                     let active = index == usize::from(show);
-                    theme::glass_button(tab, if active { theme::Glass::Selected } else { theme::Glass::Clear }, None, 12.);
-                    tab.setState(if active { 1 } else { 0 });
+                    theme::chat_tab(tab, active, index);
                 }
                 self.scroll.setHidden(show);
                 self.helpers.setHidden(!show);
@@ -604,11 +637,14 @@ impl SettingsWindow {
                     if self.tiers.is_none() { self.load_tiers(); }
                 }
             }
+            11 => {
+                NSApplication::sharedApplication(mtm()).stopModal();
+            }
             100..=104 => {
                 let index = (tag - 100) as usize;
-                if let Some(model) = self.stages[index].models.get(selected as usize).cloned() {
-                    if self.save(json!({"op":"ai.settings.set","stage_model":{
-                        "provider":self.provider_id(),"stage":STAGES[index].0,"model":model,"effort":"",
+                if let Some((provider, model)) = self.stages[index].models.get(selected as usize).cloned() {
+                    if self.save(json!({"op":"ai.settings.set","helper_model":{
+                        "provider":provider,"stage":STAGES[index].0,"model":model,"effort":"",
                     }})) { self.load_tiers(); }
                 }
             }
@@ -626,7 +662,7 @@ pub unsafe fn open() {
         settings.refresh_settings();
         settings.refresh_skills();
         if created {
-            select(&settings.provider, &PROVIDERS, Some(settings.settings["organize_provider"].as_str().unwrap_or("codex")));
+            select(&settings.provider, &PRESETS, Some(settings.settings["helper_preset"].as_str().unwrap_or("custom")));
             let clip = settings.scroll.contentView();
             clip.scrollToPoint(NSPoint::new(0., (settings.document.frame().size.height - clip.bounds().size.height).max(0.)));
             settings.scroll.reflectScrolledClipView(&clip);
@@ -634,8 +670,17 @@ pub unsafe fn open() {
             settings.clear_tiers();
             settings.load_tiers();
         }
-        settings.window.makeKeyAndOrderFront(None);
+
     });
+    let window = STATE.with(|state| state.borrow().as_ref().unwrap().window.clone());
+    let target = STATE.with(|state| state.borrow().as_ref().unwrap()._target.clone());
+    let timer: Retained<NSTimer> = msg_send![NSTimer::class(), timerWithTimeInterval: 0.1f64, target: &*target, selector: sel!(settingsTick:), userInfo: std::ptr::null::<AnyObject>(), repeats: true];
+    NSRunLoop::mainRunLoop().addTimer_forMode(&timer, objc2_app_kit::NSModalPanelRunLoopMode);
+    window.center();
+    window.makeKeyAndOrderFront(None);
+    NSApplication::sharedApplication(mtm()).runModalForWindow(&window);
+    timer.invalidate();
+    window.orderOut(None);
 }
 
 pub unsafe fn tick() {

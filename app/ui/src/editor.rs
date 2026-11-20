@@ -293,7 +293,7 @@ define_class!(
         }}
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool { unsafe {
-            if selection_shortcut(self, event) || formatting_shortcut(self, event) { true } else { msg_send![super(self), performKeyEquivalent:event] }
+            if table_shortcut(self, event) || selection_shortcut(self, event) || formatting_shortcut(self, event) { true } else { msg_send![super(self), performKeyEquivalent:event] }
         }}
         #[unsafe(method(expandSelection:))]
         fn expand_selection(&self, _sender: Option<&AnyObject>) { unsafe {
@@ -340,7 +340,7 @@ define_class!(
         }}
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) { unsafe {
-            if selection_shortcut(self, event) || formatting_shortcut(self, event) { return; }
+            if table_shortcut(self, event) || selection_shortcut(self, event) || formatting_shortcut(self, event) { return; }
             if matches!(event.keyCode(), 36 | 76)
                 && event.modifierFlags().contains(NSEventModifierFlags::Shift)
                 && input_command(self, markdown_input::Command::ShiftEnter) { return; }
@@ -433,7 +433,7 @@ define_class!(
         }}
         #[unsafe(method(deleteBackward:))]
         fn delete_backward(&self, sender: Option<&AnyObject>) { unsafe {
-            if !heading_backspace(self) && !inline_backspace(self) && !input_command(self, markdown_input::Command::Backspace) {
+            if !input_command(self, markdown_input::Command::Backspace) && !heading_backspace(self) && !inline_backspace(self) {
                 let _: () = msg_send![super(self), deleteBackward:sender];
             }
         }}
@@ -1381,6 +1381,12 @@ pub unsafe fn style(text: &NSTextView) {
 /// Local Markdown image paths resolve relative to the saved document directory.
 /// Network images are never fetched while typing.
 pub unsafe fn style_with_base(text: &NSTextView, base_directory: Option<&Path>) {
+    layout_markdown(text, base_directory, None);
+}
+
+/// A drag changes only the presentation. Keep all source ranges anchored to the
+/// original document until mouse-up, including the paragraph after the table.
+unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, preview: Option<TableSizePreview>) {
     if table_cell_is_editing(text) || image_edit::interacting() {
         return;
     }
@@ -1615,14 +1621,20 @@ pub unsafe fn style_with_base(text: &NSTextView, base_directory: Option<&Path>) 
     }
     let tables = table_previews(&source)
         .into_iter()
-        .filter(|table| !intersects(&table.bytes, active.as_ref()))
+        .filter(|table| preview.is_some_and(|p| p.start == table.bytes.start) || !intersects(&table.bytes, active.as_ref()))
+        .map(|mut table| {
+            if let Some(size) = preview.filter(|p| p.start == table.bytes.start) {
+                size.apply(&mut table);
+            }
+            table
+        })
         .collect::<Vec<_>>();
     for table in &tables {
         conceal(&storage, utf16_range(&source, table.bytes.clone()), true);
         let paragraph = NSMutableParagraphStyle::new();
         paragraph.setMinimumLineHeight(0.01);
         paragraph.setMaximumLineHeight(0.01);
-        paragraph.setParagraphSpacing(table.height() + 12.0);
+        paragraph.setParagraphSpacing(table.height() + if text.isEditable() { 34.0 } else { 12.0 });
         storage.addAttribute_value_range(
             NSParagraphStyleAttributeName,
             &paragraph,
@@ -1678,7 +1690,7 @@ pub unsafe fn style_with_base(text: &NSTextView, base_directory: Option<&Path>) 
                     label.clone(),
                     NSPoint::new(
                         EDITOR_INSET + LINE_PADDING + block.indent - width - 8.0,
-                        frame.origin.y + 1.0,
+                        frame.origin.y + if label == "•" { 3.0 } else { 1.0 },
                     ),
                 ));
             }
@@ -1915,10 +1927,16 @@ pub unsafe fn style_with_base(text: &NSTextView, base_directory: Option<&Path>) 
             let Some(local) = layout_fragment_rect(text, table.anchor(&source).location) else {
                 continue;
             };
-            let width = (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0).max(80.0);
+            let handle_room = if text.isEditable() { 22.0 } else { 0.0 };
+            let columns = table.rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
+            // 열은 고정 너비로 늘어나고, 본문 폭을 넘으면 그 안에서 고르게 나눈다.
+            let available = (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0).max(80.0) - handle_room;
+            let cell_width = TABLE_COLUMN_WIDTH.min(available / columns as f64);
+            let grid_width = cell_width * columns as f64;
+            let width = grid_width + handle_room;
             let frame = NSRect::new(
                 NSPoint::new(EDITOR_INSET, local.origin.y + 6.0),
-                NSSize::new(width, table.height()),
+                NSSize::new(width, table.height() + if text.isEditable() { 22.0 } else { 0.0 }),
             );
             let allocated = InlineTable::alloc(mtm).set_ivars(InlineTableState {
                 text: Weak::new(text),
@@ -1926,8 +1944,10 @@ pub unsafe fn style_with_base(text: &NSTextView, base_directory: Option<&Path>) 
                 base_directory: base_directory.map(Path::to_path_buf),
             });
             let view: Retained<InlineTable> = msg_send![super(allocated),initWithFrame:frame];
-            let columns = table.rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
-            let cell_width = width / columns as f64;
+            if text.isEditable() {
+                add_table_handle(&view, true, NSRect::new(NSPoint::new(grid_width, 0.0), NSSize::new(22.0, table.height())));
+                add_table_handle(&view, false, NSRect::new(NSPoint::new(0.0, table.height()), NSSize::new(grid_width, 22.0)));
+            }
             let mut previous_cell: Option<Retained<TableCell>> = None;
             for (row_index, row) in table.rows.iter().enumerate() {
                 for (column, contents) in row.iter().enumerate() {
@@ -2269,6 +2289,10 @@ define_class!(
         }
     }
 );
+
+include!("table_controls.rs");
+
+const TABLE_COLUMN_WIDTH: f64 = 140.0;
 
 struct InlineTableState {
     text: Weak<NSTextView>,

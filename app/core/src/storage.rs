@@ -74,7 +74,6 @@ pub(crate) fn connect(root: &Path) -> Result<Connection> {
       CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),title TEXT NOT NULL,path TEXT,kind TEXT NOT NULL,version INTEGER NOT NULL,hash TEXT NOT NULL,body TEXT NOT NULL DEFAULT '',deleted INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE UNIQUE INDEX IF NOT EXISTS live_paths ON documents(workspace_id,path) WHERE deleted=0 AND path IS NOT NULL;
-      CREATE TABLE IF NOT EXISTS draft_custom_titles(document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE);
       CREATE TABLE IF NOT EXISTS source_versions(document_id TEXT NOT NULL,hash TEXT NOT NULL,path TEXT NOT NULL,version INTEGER NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(document_id,hash));")?;
     let has_origin = c.prepare("PRAGMA table_info(documents)")?.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|n| n == "origin_kind");
     if !has_origin {
@@ -308,17 +307,6 @@ pub(crate) fn unique_path(dir: &Path, filename: &str) -> PathBuf {
     }
     unreachable!()
 }
-fn draft_title(body: &str) -> String {
-    body.lines()
-        .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with("!["))
-        .unwrap_or(if body.contains("![") {"이미지 노트"} else {"새 노트"})
-        .trim()
-        .trim_start_matches('#')
-        .trim()
-        .chars()
-        .take(80)
-        .collect()
-}
 pub(crate) fn insert(c: &Connection, d: &Doc) -> Result<()> {
     c.execute("INSERT INTO documents(id,workspace_id,title,path,kind,version,hash,body) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![d.id,d.workspace_id,d.title,d.path,d.kind,d.version,d.hash,d.body])?;
     Ok(())
@@ -330,11 +318,35 @@ fn list_docs(c: &Connection, w: &str, drafts: bool) -> Result<Vec<Doc>> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     ids.iter().map(|id| document(c, id)).collect()
 }
+// Finder-hidden directories and dot directories are not navigation targets.
+fn hidden_folder(path: &Path) -> Result<bool> {
+    if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.')) {
+        return Ok(true);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        if fs::symlink_metadata(path)?.st_flags() & 0x00008000 != 0 {
+            return Ok(true); // UF_HIDDEN
+        }
+    }
+    Ok(false)
+}
+fn inside_hidden_folder(base: &Path, relative_path: &str) -> Result<bool> {
+    let mut current = base.to_path_buf();
+    if let Some(parent) = Path::new(relative_path).parent() {
+        for component in parent.components() {
+            current.push(component);
+            if hidden_folder(&current)? { return Ok(true); }
+        }
+    }
+    Ok(false)
+}
 fn folders(base: &Path, current: &Path, result: &mut Vec<Value>) -> Result<()> {
     for e in fs::read_dir(current)? {
         let e = e?;
         let ft = e.file_type()?;
-        if ft.is_symlink() {
+        if ft.is_symlink() || hidden_folder(&e.path())? {
             continue;
         }
         if ft.is_dir() {
@@ -774,6 +786,9 @@ pub fn handle(root: &Path, request: &Value) -> Result<Value> {
             let docs = list_docs(&tx, w, op == "draft.list")?;
             let mut a = Vec::new();
             for d in docs {
+                if op == "tree" && d.path.as_deref().map(|p| inside_hidden_folder(&b, p)).transpose()?.unwrap_or(false) {
+                    continue;
+                }
                 a.push(if op == "draft.list" {
                     value(root, &tx, &d)?
                 } else {
@@ -787,7 +802,7 @@ pub fn handle(root: &Path, request: &Value) -> Result<Value> {
                 folders(&b, &b, &mut f)?;
                 let hashes = analysis_hashes(root, w)?;
                 for entry in &mut a { set_analysis_state(entry, &hashes); }
-                json!({"entries":a,"folders":f})
+                json!({"entries":a,"folders":f,"root_path":b})
             }
         }
         "note.image.import" => {
@@ -799,7 +814,7 @@ pub fn handle(root: &Path, request: &Value) -> Result<Value> {
             let extension = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { "png" }
                 else if bytes.starts_with(&[0xff, 0xd8, 0xff]) { "jpg" }
                 else { bail!("PNG 또는 JPEG 이미지가 필요합니다"); };
-            let dir = b.join("이미지");
+            let dir = b.join(".images");
             ensure_no_symlink(&b, &dir)?;
             fs::create_dir_all(&dir)?;
             let filename = format!("{}.{}", digest(&bytes), extension);
@@ -809,7 +824,7 @@ pub fn handle(root: &Path, request: &Value) -> Result<Value> {
             else if digest(&read_bytes(&path)?) != digest(&bytes) { bail!("보관된 이미지가 손상되었습니다"); }
             let folder = optional(request, "folder");
             relative(folder)?;
-            let destination = format!("{}이미지/{}", "../".repeat(Path::new(folder).components().count()),filename);
+            let destination = format!("{}.images/{}", "../".repeat(Path::new(folder).components().count()),filename);
             json!({"destination":destination,"image_base":b,"path":path})
         }
         "draft.create" => {
@@ -822,7 +837,7 @@ pub fn handle(root: &Path, request: &Value) -> Result<Value> {
                 let d = Doc {
                     id: Uuid::new_v4().to_string(),
                     workspace_id: w.into(),
-                    title: draft_title(body),
+                    title: "제목 없음".into(),
                     path: None,
                     kind: "draft".into(),
                     version: 1,
@@ -843,7 +858,6 @@ pub fn handle(root: &Path, request: &Value) -> Result<Value> {
             d.version += 1;
             tx.execute("UPDATE documents SET title=?2,version=?3,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
                 params![d.id, d.title, d.version])?;
-            tx.execute("INSERT OR IGNORE INTO draft_custom_titles(document_id) VALUES(?1)", [&d.id])?;
             value(root, &tx, &d)?
         }
         "draft.update" => {
@@ -861,13 +875,6 @@ pub fn handle(root: &Path, request: &Value) -> Result<Value> {
                 json!({"empty":true,"id":null,"deleted_id":d.id,"version":0,"kind":"draft"})
             } else {
                 d.body = body.into();
-                let custom_title: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM draft_custom_titles WHERE document_id=?1)",
-                    [&d.id], |row| row.get(0),
-                )?;
-                if !custom_title {
-                    d.title = draft_title(body);
-                }
                 d.hash = digest(body.as_bytes());
                 d.version += 1;
                 tx.execute("UPDATE documents SET body=?2,title=?3,hash=?4,version=?5,updated_at=CURRENT_TIMESTAMP WHERE id=?1",params![d.id,d.body,d.title,d.hash,d.version])?;
@@ -1129,18 +1136,51 @@ mod tests {
         )
     }
     #[test]
+    fn tree_hides_hidden_folders_and_their_documents() {
+        let t = tempfile::tempdir().unwrap(); let w = ws(t.path());
+        for name in [".secret", "visible", "finder-hidden"] {
+            call(t.path(), json!({"op":"folder.create","workspace_id":w,"name":name}));
+            call(t.path(), json!({"op":"folder.create","workspace_id":w,"parent":name,"name":"nested"}));
+            let d = draft(t.path(), &w, "body");
+            call(t.path(), json!({"op":"note.save","draft_id":d["id"],"title":"note","folder":format!("{name}/nested")}));
+        }
+        #[cfg(target_os = "macos")]
+        assert!(std::process::Command::new("chflags").arg("hidden")
+            .arg(t.path().join("workspaces").join(&w).join("files/finder-hidden"))
+            .status().unwrap().success());
+        let tree = call(t.path(), json!({"op":"tree","workspace_id":w}));
+        for key in ["folders", "entries"] {
+            let rows = tree[key].as_array().unwrap();
+            assert!(rows.iter().any(|r| r["path"].as_str().unwrap().starts_with("visible/")));
+            assert!(!rows.iter().any(|r| r["path"].as_str().unwrap().starts_with(".secret")));
+            #[cfg(target_os = "macos")]
+            assert!(!rows.iter().any(|r| r["path"].as_str().unwrap().starts_with("finder-hidden")));
+        }
+    }
+    #[test]
+    fn body_edits_keep_default_title() {
+        let t = tempfile::tempdir().unwrap();
+        let w = ws(t.path());
+        let d = draft(t.path(), &w, "# 첫 줄");
+        assert_eq!(d["title"], "제목 없음");
+        let d = call(t.path(), json!({"op":"draft.update","id":d["id"],"body":"다른 첫 줄","expected_version":d["version"]}));
+        assert_eq!(d["title"], "제목 없음");
+    }
+
+    #[test]
     fn pasted_images_dedupe_rebase_and_survive_deletion() {
         let t=tempfile::tempdir().unwrap(); let w=ws(t.path());
         let input=t.path().join("paste.png"); fs::write(&input,b"\x89PNG\r\n\x1a\npixels").unwrap();
         let request=json!({"op":"note.image.import","workspace_id":w,"source":input});
         let image=call(t.path(),request.clone()); assert_eq!(image,call(t.path(),request));
-        assert!(image["destination"].as_str().unwrap().starts_with("이미지/"));
+        assert!(image["destination"].as_str().unwrap().starts_with(".images/"));
+        assert!(call(t.path(),json!({"op":"tree","workspace_id":w}))["folders"].as_array().unwrap().is_empty());
         let body=format!("앞\n![그림](<{}> \"stology:width=237;x=0.700;wrap=1\")\n\n옆 필기",image["destination"].as_str().unwrap());
         let d=draft(t.path(),&w,&body);
         assert!(Path::new(d["image_base"].as_str().unwrap()).is_dir());
         call(t.path(),json!({"op":"folder.create","workspace_id":w,"name":"단원"}));
         let note=call(t.path(),json!({"op":"note.save","draft_id":d["id"],"title":"필기","folder":"단원"}));
-        assert!(note["body"].as_str().unwrap().contains("../이미지/"));
+        assert!(note["body"].as_str().unwrap().contains("../.images/"));
         assert_eq!(note["hash"],json!(digest(note["body"].as_str().unwrap().as_bytes())));
         let moved=call(t.path(),json!({"op":"note.move","id":note["id"],"folder":""}));
         assert_eq!(moved["body"],body);

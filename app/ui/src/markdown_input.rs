@@ -336,6 +336,26 @@ pub fn command(source: &str, caret: usize, command: Command) -> Option<Edit> {
     if caret > source.len() || !source.is_char_boundary(caret) {
         return None;
     }
+    // A rendered table conceals its Markdown source. At the boundary just
+    // after it, delete the complete parsed block as one undoable edit.
+    if command == Command::Backspace {
+        for (event, range) in pulldown_cmark::Parser::new_ext(
+            source,
+            pulldown_cmark::Options::ENABLE_TABLES,
+        )
+        .into_offset_iter()
+        {
+            if matches!(event, pulldown_cmark::Event::Start(pulldown_cmark::Tag::Table(_)))
+                && caret == range.end
+            {
+                return Some(Edit {
+                    caret: range.start,
+                    range,
+                    replacement: String::new(),
+                });
+            }
+        }
+    }
     let ending = newline(source);
     for block in fences(source) {
         // The fence becomes a code block only once Enter commits the shortcut.
@@ -497,6 +517,22 @@ pub fn command(source: &str, caret: usize, command: Command) -> Option<Edit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn backspace_after_table_deletes_only_the_table() {
+        for ending in ["\n", "\r\n"] {
+            let table = format!("| 이름 | 값 |{ending}| --- | --- |{ending}| 한글 | 😀 |{ending}");
+            let source = format!("앞{ending}{ending}{table}{ending}뒤");
+            let caret = source.find("뒤").unwrap() - ending.len();
+            let (result, after) = apply(&source, caret, Command::Backspace);
+            assert_eq!(result, format!("앞{ending}{ending}{ending}뒤"));
+            assert_eq!(after, format!("앞{ending}{ending}").len());
+            assert!(command(&source, source.len(), Command::Backspace).is_none());
+        }
+        let table = "| A | B |\n| - | - |\n| 1 | 2 |";
+        assert_eq!(apply(table, table.len(), Command::Backspace), (String::new(), 0));
+        let code = "```\n| A | B |\n| - | - |\n```\n";
+        assert!(command(code, code.len(), Command::Backspace).is_none());
+    }
     #[test]
     fn bullet_tab_enter_outdent_exit_sequence() {
         for marker in ["-", "*", "+"] {

@@ -1245,9 +1245,11 @@ impl Panel {
             let y = index as f64 * HISTORY_ROW_HEIGHT;
             let current = row["id"] == self.data["id"];
             let frame = rect(2.,y+2.,width-4.,50.);
+            // 선택 배경은 구분선 사이 칸을 채우고, 구분선은 늘 그 위에 그린다.
             if current {
-                body.addSubview(&theme::soft_selection(frame));
-            } else if index > 0 && self.matches[index-1]["id"] != self.data["id"] {
+                body.addSubview(&theme::selection_wash(rect(0.,y,width,HISTORY_ROW_HEIGHT)));
+            }
+            if index > 0 {
                 body.addSubview(&theme::soft_divider(rect(12.,y-0.5,width-24.,1.),true));
             }
             let card = view(frame);
@@ -1256,9 +1258,10 @@ impl Panel {
             name.setTextColor(Some(&suggest_color(0.19,0.13,0.26,1.)));
             name.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
             if current {
-                let badge = text_label("선택됨",rect((width-65.).max(12.),25.,48.,18.),10.5,false);
+                let badge = text_label("선택됨",rect((width-65.).max(12.),25.,48.,18.),10.5,true);
                 name.setFrame(rect(12.,25.,(width-85.).max(1.),18.));
-                badge.setTextColor(Some(&suggest_color(0.10,0.36,0.22,1.)));
+                name.setTextColor(Some(&suggest_color(0.23,0.23,0.65,1.)));
+                badge.setTextColor(Some(&suggest_color(0.36,0.40,0.90,1.)));
                 badge.setAlignment(NSTextAlignment::Right);
                 card.addSubview(&badge);
             }
@@ -1311,7 +1314,6 @@ impl Panel {
         } else {
             let Some(row) = index.and_then(|i|self.matches.get(i)) else { return Ok(()); };
             if row["id"] == self.data["id"] {
-                self.close_history(true);
                 return Ok(());
             }
             let mut request = self.request("chat.open");
@@ -1322,9 +1324,27 @@ impl Panel {
             self.restore_model_selection();
             self.fill_efforts();
         }
+        // 목록에서 고른 경우에는 시트를 열어 둔 채 선택 표시만 옮긴다.
+        let keep = index.is_some().then(|| (self.search.stringValue().to_string(), self.list.documentVisibleRect().origin.y));
         self.quiet_since = None;
         self.load();
+        if let Some((term, scrolled)) = keep {
+            self.reopen_history(&term, scrolled);
+        }
         Ok(())
+    }
+
+    unsafe fn reopen_history(&mut self, term: &str, scrolled: f64) {
+        self.search.setStringValue(&NSString::from_str(term));
+        self.history_query = term.to_owned();
+        self.history_open = true;
+        self.history_close_at = None;
+        self.history_viewport.setHidden(false);
+        self.history.setToolTip(Some(&NSString::from_str("대화 목록 닫기")));
+        self.refresh_history(false);
+        if let Some(document) = self.list.documentView() {
+            document.scrollPoint(NSPoint::new(0., scrolled));
+        }
     }
     pub unsafe fn tick(&mut self, ws: Option<&str>) -> bool {
         self.context(ws);

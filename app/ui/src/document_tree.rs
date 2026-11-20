@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
+    path::PathBuf,
 };
 
 const FILE_URL_TYPE: &str = "public.file-url";
@@ -19,6 +20,7 @@ const DRAG_TYPE: &str = "app.stology.local.document";
 #[derive(Clone, Debug)]
 pub enum Event {
     Open(Value),
+    OpenFinder(PathBuf),
     Analyze(Value),
     Reread(Value),
     Annotate(Value),
@@ -59,6 +61,7 @@ impl Node {
 }
 pub struct TreeState {
     nodes: Vec<Node>,
+    root_path: Option<PathBuf>,
     // Data source, delegate and menu targets are non-owning AppKit references.
     outline: Retained<NSOutlineView>,
     restoring: Cell<bool>,
@@ -455,6 +458,12 @@ define_class!(
         }}
     }
     impl DocumentTree {
+        #[unsafe(method(openFinder:))]
+        fn open_finder(&self, sender: &NSMenuItem) {
+            if let Some(path) = sender.representedObject().and_then(|object| object.downcast::<NSString>().ok()) {
+                enqueue(Event::OpenFinder(PathBuf::from(path.to_string())));
+            }
+        }
         #[unsafe(method(newNote:))]
         fn new_note(&self, _sender: Option<&AnyObject>) { enqueue(Event::NewNote(self.ivars().context_parent.borrow().clone())); }
         #[unsafe(method(renameFolder:))]
@@ -753,6 +762,26 @@ impl DocumentTree {
             rename.setImage(theme::icon("pencil", 13.).as_deref());
             rename.setEnabled(d["missing"] != true);
             menu.addItem(&rename);
+        }
+        if let Some(node) = node {
+            let path = if let Some(document) = &node.document {
+                document["absolute_path"].as_str().map(PathBuf::from)
+            } else {
+                self.ivars().root_path.as_ref().map(|root| root.join(&node.path))
+            };
+            let finder = NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm()),
+                &NSString::from_str("Finder 열기"),
+                Some(sel!(openFinder:)),
+                &NSString::from_str(""),
+            );
+            finder.setTarget(Some(self));
+            finder.setImage(theme::icon("folder-open", 13.).as_deref());
+            finder.setEnabled(path.is_some() && node.document.as_ref().is_none_or(|d| d["missing"] != true));
+            if let Some(path) = path {
+                finder.setRepresentedObject(Some(&NSString::from_str(&path.to_string_lossy())));
+            }
+            menu.addItem(&finder);
         }
     }
     pub unsafe fn reveal_folder(&self, path: &str) {
@@ -1153,6 +1182,7 @@ pub unsafe fn build(
     let controller: Retained<DocumentTree> = msg_send![
         super(DocumentTree::alloc(mtm()).set_ivars(TreeState {
             nodes,
+            root_path: tree["root_path"].as_str().map(PathBuf::from),
             outline: outline.clone(),
             restoring: Cell::new(true),
             context_document: RefCell::new(None),

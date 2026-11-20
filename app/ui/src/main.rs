@@ -37,6 +37,7 @@ mod organize_panel;
 mod pptx_preview;
 mod save_dialog;
 mod scrollbar;
+mod shortcut_panel;
 mod sidebar_layout;
 mod sidebar_resize;
 mod sidebar_hide;
@@ -283,6 +284,8 @@ enum Action {
     Save,
     Delete,
     ToggleMap,
+    ToggleShortcuts,
+    CloseShortcuts,
     ToggleSidebar(usize),
     RightMode(bool),
     Import,
@@ -377,6 +380,7 @@ struct State {
     left_hide_veil: Retained<NSView>,
     left_hide_arrow: Retained<NSView>,
     left_resizer: Retained<sidebar_resize::Divider>,
+    shortcuts: Option<Retained<NSView>>,
     right_width: f64,
     right_drag_offset: f64,
     right_drag_pending: bool,
@@ -746,6 +750,28 @@ unsafe fn clear(v: &NSView, actions: &mut Vec<Option<Action>>) {
     for x in v.subviews().iter() {
         release_actions(&x, actions);
         x.removeFromSuperview();
+    }
+}
+unsafe fn open_tree_item_in_finder(path: &std::path::Path) {
+    let Ok(path) = std::path::absolute(path) else {
+        alert("Finder를 열 수 없습니다", "항목의 저장 경로를 확인해 주세요.");
+        return;
+    };
+    let file_type = std::fs::symlink_metadata(&path).ok().map(|entry| entry.file_type());
+    let finder = NSWorkspace::sharedWorkspace();
+    let path = NSString::from_str(&path.to_string_lossy());
+    let opened = match file_type {
+        Some(kind) if kind.is_dir() => finder.selectFile_inFileViewerRootedAtPath(None, &path),
+        Some(kind) if kind.is_file() => {
+            finder.selectFile_inFileViewerRootedAtPath(Some(&path), &NSString::from_str(""))
+        }
+        _ => {
+            alert("Finder를 열 수 없습니다", "항목의 저장 위치를 찾을 수 없습니다.");
+            return;
+        }
+    };
+    if !opened {
+        alert("Finder를 열 수 없습니다", "Finder에서 항목의 저장 위치를 열지 못했습니다.");
     }
 }
 unsafe fn alert(title: &str, message: &str) {
@@ -2438,6 +2464,7 @@ impl State {
             let requires_save = !matches!(
                 &event,
                 document_tree::Event::ToggleFolder(_, _)
+                    | document_tree::Event::OpenFinder(_)
                     | document_tree::Event::Analyze(_)
                     | document_tree::Event::Reread(_)
                     | document_tree::Event::Annotate(_)
@@ -2482,6 +2509,7 @@ impl State {
                         self.refresh_right();
                     }
                 }
+                document_tree::Event::OpenFinder(path) => open_tree_item_in_finder(&path),
                 document_tree::Event::Analyze(doc) => self.analyze_document(doc),
                 document_tree::Event::Reread(doc) => {
                     if self.workspace.as_deref() == doc["workspace_id"].as_str() && !self.analysis_busy() {
@@ -4250,6 +4278,12 @@ impl State {
                 | Action::Connect
         );
         match a {
+            Action::ToggleShortcuts | Action::CloseShortcuts => {
+                if let Some(panel) = &self.shortcuts {
+                    panel.setHidden(matches!(a, Action::CloseShortcuts) || !panel.isHidden());
+                    self.layout_frames(self.root.bounds().size);
+                }
+            }
             Action::ToggleSidebar(side) => self.toggle_sidebar(side),
             Action::RightMode(chat) => {
                 self.chat_mode = chat;
@@ -4981,7 +5015,13 @@ impl State {
             }
         }
         let layout = sidebar_layout::Layout::with_widths(size.width, self.sidebar_openness, self.left_width, self.right_width);
-        let width = layout.center_width;
+        let mut width = layout.center_width;
+        if let Some(panel) = self.shortcuts.as_ref().filter(|panel| !panel.isHidden()) {
+            let panel_width = sidebar_layout::DEFAULT_RIGHT_WIDTH;
+            let x = size.width - 14. - panel_width;
+            panel.setFrame(rect(x, 14., panel_width, size.height - 28.));
+            width = width.min(x - sidebar_layout::RESIZE_WIDTH - layout.center_x);
+        }
         let height = size.height - 28.;
         sidebar_resize::prepare_content_width(&self.left);
         self.left_shell.setFrame(rect(layout.left_x - self.left_drag_offset, 14., layout.left_width, height));
@@ -5319,6 +5359,16 @@ unsafe fn menu(app: &NSApplication, target: &Delegate) {
     app.setHelpMenu(Some(&help));
     app.setMainMenu(Some(&main));
 }
+unsafe fn shortcut_icon(button: &NSButton, symbol: &str, label: &str) {
+    let label = NSString::from_str(label);
+    button.setBordered(false);
+    button.setToolTip(Some(&label));
+    button.setAccessibilityLabel(Some(&label));
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), Some(&label));
+    button.setImage(image.as_deref());
+    button.setImagePosition(NSCellImagePosition::ImageOnly);
+}
+
 fn main() {
     unsafe {
         font::register_bundled_fonts();
@@ -5428,6 +5478,7 @@ fn main() {
             left_hide_veil: sidebar_hide::new(true),
             left_hide_arrow: sidebar_hide::new_arrow(true),
             left_resizer: sidebar_resize::Divider::new(0),
+            shortcuts: None,
             right_width: sidebar_layout::DEFAULT_RIGHT_WIDTH,
             right_drag_offset: 0.,
             right_drag_pending: false,
@@ -5526,7 +5577,7 @@ fn main() {
                 let new_note = NSButton::buttonWithTitle_target_action(
                     &NSString::from_str(""), Some(&target), Some(sel!(newDocument:)), mtm(),
                 );
-                new_note.setFrame(rect(titlebar.bounds().size.width - 74., f.origin.y - 3., 28., 22.));
+                new_note.setFrame(rect(titlebar.bounds().size.width - 106., f.origin.y - 3., 28., 22.));
                 new_note.setBordered(false);
                 if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
                     &NSString::from_str("plus"), Some(&NSString::from_str("새 노트")),
@@ -5538,6 +5589,10 @@ fn main() {
                 new_note.setAccessibilityLabel(Some(&NSString::from_str("새 노트")));
                 new_note.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin | NSAutoresizingMaskOptions::ViewMinXMargin);
                 titlebar.addSubview(&new_note);
+                let shortcuts = s.button("", rect(titlebar.bounds().size.width - 74., f.origin.y - 3., 28., 22.), Action::ToggleShortcuts);
+                shortcut_icon(&shortcuts, "keyboard", "단축키 열기 또는 닫기");
+                shortcuts.setAutoresizingMask(new_note.autoresizingMask());
+                titlebar.addSubview(&shortcuts);
                 for side in 0..2 {
                 let x = if side == 0 { f.origin.x + 76. } else { titlebar.bounds().size.width - 42. };
                 let label = if side == 0 { "왼쪽 사이드바 접기 또는 펼치기" } else { "오른쪽 사이드바 접기 또는 펼치기" };
@@ -5588,6 +5643,11 @@ fn main() {
         s.root.addSubview(&s.right_hide_veil);
         s.root.addSubview(&s.right_hide_arrow);
         s.root.addSubview(&s.right_resizer);
+        let close_shortcuts = s.button("", rect(0., 0., 32., 32.), Action::CloseShortcuts);
+        shortcut_icon(&close_shortcuts, "xmark", "단축키 닫기");
+        let shortcuts = shortcut_panel::new(&close_shortcuts);
+        s.root.addSubview(&shortcuts);
+        s.shortcuts = Some(shortcuts);
         s.save_button = s.button("저장", rect(711., 767., 67., 30.), Action::Save);
         s.save_button.setKeyEquivalent(&NSString::from_str("s"));
         s.center.addSubview(&s.save_button);
@@ -5628,13 +5688,14 @@ fn main() {
                 s.provider = strv(&p, "provider");
             }
         }
-        s.layout(root.frame().size);
+        window.setContentView(Some(&root));
+        window.center();
+        // Attaching the root gives it the restored window's actual content size.
+        s.layout(root.bounds().size);
         s.update_header();
         s.probe_provider();
         editor::set_image_importer(import_image);
         STATE.with(|state| *state.borrow_mut() = Some(s));
-        window.setContentView(Some(&root));
-        window.center();
         window.makeKeyAndOrderFront(None);
         app.activateIgnoringOtherApps(true);
         let _timer: Retained<NSTimer> = msg_send![NSTimer::class(),scheduledTimerWithTimeInterval:0.20f64 target:&*target selector:sel!(tick:) userInfo:std::ptr::null::<AnyObject>() repeats:true];

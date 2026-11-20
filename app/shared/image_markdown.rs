@@ -86,14 +86,15 @@ pub fn images(source: &str) -> Vec<ImageLink> {
 /// Rebase only app-owned image links. Never touch code, remote links or prose.
 pub fn rebase(source: &str, old_folder: &str, new_folder: &str) -> String {
     let old_depth = old_folder.split('/').filter(|s| !s.is_empty()).count();
-    let prefix = format!("{}이미지/", "../".repeat(old_depth));
-    let new_prefix = format!(
-        "{}이미지/",
-        "../".repeat(new_folder.split('/').filter(|s| !s.is_empty()).count())
-    );
+    let old_parent = "../".repeat(old_depth);
+    let new_parent = "../".repeat(new_folder.split('/').filter(|s| !s.is_empty()).count());
     let mut result = source.to_owned();
     for image in images(source).into_iter().rev() {
-        let Some(file) = image.destination.strip_prefix(&prefix) else {
+        // Preserve legacy links while rebasing new hidden attachments too.
+        let Some((directory, file)) = [".images", "이미지"].iter().find_map(|directory| {
+            image.destination.strip_prefix(&format!("{old_parent}{directory}/"))
+                .map(|file| (*directory, file))
+        }) else {
             continue;
         };
         let Some((hash, ext)) = file.rsplit_once('.') else {
@@ -111,7 +112,7 @@ pub fn rebase(source: &str, old_folder: &str, new_folder: &str) -> String {
             if raw[start..].starts_with(&image.destination) {
                 result.replace_range(
                     image.bytes.start + start..image.bytes.start + start + image.destination.len(),
-                    &format!("{new_prefix}{file}"),
+                    &format!("{new_parent}{directory}/{file}"),
                 );
             }
         }
@@ -121,6 +122,14 @@ pub fn rebase(source: &str, old_folder: &str, new_folder: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hidden_image_links_rebase_without_touching_prose_or_code() {
+        let link = format!("![image](<.images/{}.png>)", "b".repeat(64));
+        let source = format!("{link}\n\n`.images/example.png`\n\n```\n{link}\n```");
+        let moved = rebase(&source, "", "unit/notes");
+        assert_eq!(moved.matches("../../.images/").count(), 1);
+        assert_eq!(rebase(&moved, "unit/notes", ""), source);
+    }
     #[test]
     fn layout_roundtrip_and_rebase() {
         let hash = "a".repeat(64);

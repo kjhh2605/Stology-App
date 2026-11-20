@@ -631,6 +631,52 @@ pub unsafe fn soft_selection(frame: NSRect) -> Retained<NSView> {
     v
 }
 
+unsafe fn gradient_layer(bounds: NSRect, colors: &[Retained<NSColor>], stops: &[f64], horizontal: bool) -> Option<Retained<AnyObject>> {
+    let g: Retained<AnyObject> = msg_send![AnyClass::get(c"CAGradientLayer")?, layer];
+    let locations: Vec<_> = stops.iter().map(|&s| NSNumber::new_f64(s)).collect();
+    let _: () = msg_send![&g, setColors: &*cg_array(colors)];
+    let _: () = msg_send![&g, setLocations: &*NSArray::from_retained_slice(&locations)];
+    let (start, end) = if horizontal { ((0., 0.5), (1., 0.5)) } else { ((0.5, 0.), (0.5, 1.)) };
+    let _: () = msg_send![&g, setStartPoint: NSPoint::new(start.0, start.1)];
+    let _: () = msg_send![&g, setEndPoint: NSPoint::new(end.0, end.1)];
+    let _: () = msg_send![&g, setFrame: bounds];
+    Some(g)
+}
+
+/// 대화 목록 시트의 선택된 대화 행 배경. 구분선 사이 칸을 모서리 없이 채우고,
+/// 왼쪽 페리윙클에서 오른쪽 라벤더로 양 끝이 진하며 가운데는 맑다.
+pub unsafe fn selection_wash(frame: NSRect) -> Retained<NSView> {
+    let v = NSView::initWithFrame(NSView::alloc(mtm()), frame);
+    let _: () = msg_send![&v, setAccessibilityElement: false];
+    let l = layer(&v);
+    let bounds = NSRect::new(NSPoint::new(0., 0.), frame.size);
+    let Some(plain) = AnyClass::get(c"CALayer") else { return v; };
+    let tint = |rgb: (f64, f64, f64), a: f64| color(rgb.0 / 255., rgb.1 / 255., rgb.2 / 255., a);
+    let (left, mid, right) = ((126., 136., 240.), (150., 140., 238.), (176., 148., 240.));
+    let across = [tint(left, 0.24), tint(left, 0.19), tint(left, 0.12), tint(mid, 0.07), tint(mid, 0.05),
+        tint(mid, 0.07), tint(right, 0.12), tint(right, 0.18), tint(right, 0.22)];
+    let across_stops = [0., 0.08, 0.2, 0.35, 0.5, 0.65, 0.8, 0.92, 1.];
+    let along = [tint(mid, 0.07), tint(mid, 0.02), tint(mid, 0.02), tint(mid, 0.07)];
+    // 좌우 끝은 구분선처럼 서서히, 위아래 끝은 구분선이 없는 첫 행에서도 딱 잘리지 않을 만큼만 흐린다.
+    let ink = |a: f64| color(0., 0., 0., a);
+    let fade_across = [ink(0.), ink(0.35), ink(0.75), ink(1.), ink(1.), ink(0.75), ink(0.35), ink(0.)];
+    let edge = (5. / frame.size.height.max(10.)).min(0.5);
+    let (Some(fill), Some(rim), Some(mask_across), Some(mask_along)) = (
+        gradient_layer(bounds, &across, &across_stops, true),
+        gradient_layer(bounds, &along, &[0., 0.35, 0.65, 1.], false),
+        gradient_layer(bounds, &fade_across, &[0., 0.03, 0.07, 0.12, 0.88, 0.93, 0.97, 1.], true),
+        gradient_layer(bounds, &[ink(0.4), ink(1.), ink(1.), ink(0.4)], &[0., edge, 1. - edge, 1.], false),
+    ) else { return v; };
+    let inner: Retained<AnyObject> = msg_send![plain, layer];
+    let _: () = msg_send![&inner, setFrame: bounds];
+    let _: () = msg_send![&inner, addSublayer: &*fill];
+    let _: () = msg_send![&inner, addSublayer: &*rim];
+    let _: () = msg_send![&inner, setMask: &*mask_along];
+    let _: () = msg_send![&l, addSublayer: &*inner];
+    let _: () = msg_send![&l, setMask: &*mask_across];
+    v
+}
+
 /// A small, one-shot lift on explicit workspace selection. Only presentation
 /// layers move: row geometry, hit targets and scroll layout stay stable.
 pub unsafe fn float_selection(view: &NSView) {

@@ -347,9 +347,11 @@ fn draft(root: &Path, job: &Path, c: &Connection, id: &str, w: &str, provider: &
     let routing = skills::routing(root)?;
     let max_notes = routing["distill"]["max_notes"].as_u64().unwrap_or(3) as usize;
     let skill = skills::load(root, "distill-chat", "")?;
+    let helper_settings = skills::settings(root);
+    let provider = skills::helper_provider(&helper_settings, "distill", provider);
     let catalog = chat::handle(root, &json!({"op":"chat.models","provider":provider}))?["models"].as_array().cloned().unwrap_or_default();
     let settings = skills::settings(root);
-    let stages = skills::stage_plan(root, provider, settings["organize_mode"].as_str().unwrap_or("auto"), &catalog)?;
+    let stages = skills::stage_plan_for(root, provider, settings["organize_mode"].as_str().unwrap_or("auto"), &catalog, &["distill"])?;
     let stage = &stages["stages"]["distill"];
     anyhow::ensure!(stage["model"].is_string(), "대화 정리에 쓸 모델을 찾지 못했습니다");
     let (model, effort) = (stage["model"].as_str().unwrap_or("").to_owned(), stage["effort"].as_str().unwrap_or("").to_owned());
