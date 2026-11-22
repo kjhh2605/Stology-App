@@ -539,7 +539,7 @@ export const shortcuts = [
     ],
     "source": {
       "path": "app/docs/keyboard-shortcuts.md",
-      "line": 56
+      "line": 57
     },
     "scene": {
       "kind": "search",

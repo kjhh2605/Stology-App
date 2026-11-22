@@ -64,7 +64,7 @@ function makeRecipe(item) {
   case 'map-search-focus': return {...config,variant:'search',before:search('',{map:true}),after:search('',{map:true,focus:true}),focus:{x:40,y:20}};
   case 'save': return {...config,variant:'dialog',before:baseNote() + '<div class="nm-save-status">변경 사항 있음</div>',middle:saveDialog(),after:baseNote() + '<div class="nm-save-status nm-confirmed">✓ 이 Mac에 저장됨</div>',focus:{x:76,y:76}};
   case 'save-existing': return {...config,variant:'dialog',before:baseNote() + '<div class="nm-save-status">저장 중</div>',after:baseNote() + '<div class="nm-save-status nm-confirmed">✓ 이 Mac에 저장됨</div>',focus:{x:81,y:18}};
-  case 'quit': return {...config,variant:'quit',before:baseNote() + '<div class="nm-save-status">저장 중</div>',middle:baseNote() + '<div class="nm-save-status nm-confirmed">✓ 이 Mac에 저장됨</div>',after:'<div class="nm-quit-desktop"><div class="nm-desktop-orbit"></div><img src="/mark.svg" alt="" width="56" height="56"></div>',focus:{x:20,y:15}};
+  case 'quit': return {...config,variant:'quit',before:baseNote() + '<div class="nm-save-status">저장 중</div>',middle:baseNote() + '<div class="nm-save-status nm-confirmed">✓ 이 Mac에 저장됨</div>',after:'<div class="nm-quit-desktop"><div class="nm-desktop-orbit"></div><img src="/mark.png" alt="" width="56" height="56"></div>',focus:{x:20,y:15}};
   default: return null;
  }
 }

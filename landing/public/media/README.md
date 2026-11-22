@@ -16,6 +16,26 @@ python3 landing/scripts/encode-recordings.py --legacy
 
 출력은 임시 파일을 완성한 뒤 교체한다. 원본 크기가 바뀌었거나 알려진 촬영 규격이 아니면 임의로 잘라내지 않고 실패를 보고한다. 인코딩 메타 정보와 전후 6컷 접촉 시트는 `/tmp/stology-landing-capture/passive-qa/`에 기록한다.
 
+## 히어로 자산
+
+`hero/`와 `../mark.png`는 촬영물이 아니라 저장소의 원본에서 스크립트로 만든다.
+
+| 파일 | 내용 |
+| --- | --- |
+| `../mark.png` | 앱 아이콘 `app/assets/StologyLocal.png`에서 분리한 S 리본을 192px 정사각으로 줄인 마크·파비콘(투명 배경). 색과 음영은 원본 그대로이며 가장자리 알파만 계산했다. |
+| `hero/star-sheet.webp` | 라벤더 별 스프라이트 시트(2048×2048, 8열·256px 칸). 0–47번은 7.5° 간격 한 바퀴, 48–62번은 정면 ±52.5°의 눈 감은 프레임 |
+| `hero/star.webp` | 시트 3번 프레임(22.5°)의 단일 이미지. 마무리 섹션에 사용 |
+
+히어로의 은하수는 이미지 자산 없이 `src/hero-scene.js`가 그린다. 이전 히어로가 쓰던 `hero/s-ribbon.webp`는 삭제했다.
+
+```sh
+python3 landing/scripts/extract-icon-s.py app/assets/StologyLocal.png landing/public
+blender -b <lavender-star.blend> --python landing/scripts/render-star-sprites.py -- /tmp/stology-star-frames
+python3 landing/scripts/build-star-sheet.py /tmp/stology-star-frames landing/public/media/hero
+```
+
+분리·시트 스크립트는 numpy·pillow·scipy가 필요하다. 별 원본은 `kjhh2605/3d` 워크트리의 `app/assets/helpers/concepts/lavender-star-turnaround-v5/lavender-star.blend`이며 2026-11-22 Blender 5.2.3 Cycles(512px·128샘플·디노이즈)로 렌더했다. 원본의 조명·재질·정면 직교 카메라를 그대로 두고 배경만 투명으로 바꿨으며 원본 파일은 저장하지 않았다. Metal 셰이더 캐시 단계에서 Blender가 중단되면 같은 명령 뒤에 빠진 파일명(`open-45.png` 등)을 덧붙여 그 프레임만 다시 렌더한다. 시트 칸 규격은 `src/hero-scene.js`의 `SHEET` 상수와 같아야 한다.
+
 ## 보조 자료
 
 | 파일 | 내용 |
