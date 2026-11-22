@@ -9,6 +9,7 @@ pub struct BlockLine {
     pub label: Option<String>,
     pub quote_depth: usize,
     pub indent: f64,
+    pub list_depth: usize,
 }
 
 pub fn blocks(source: &str) -> Vec<BlockLine> {
@@ -84,6 +85,7 @@ pub fn blocks(source: &str) -> Vec<BlockLine> {
                 prefix: start..start + pos,
                 label,
                 quote_depth: quotes,
+                list_depth: leading / 2,
                 indent: leading as f64 * 8.0
                     + quotes as f64 * 20.0
                     + if list { label_width } else { 4.0 },

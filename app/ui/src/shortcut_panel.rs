@@ -1,8 +1,8 @@
-use crate::{mtm, rect, scrollbar, sidebar_layout::DEFAULT_RIGHT_WIDTH, text_label, theme, view};
+use crate::{font, mtm, rect, scrollbar, sidebar_layout::DEFAULT_RIGHT_WIDTH, text_label, theme, view};
 use objc2::rc::Retained;
 use objc2::{msg_send, MainThreadOnly};
-use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSButton, NSScrollView, NSTextAlignment, NSView};
-use objc2_foundation::NSPoint;
+use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSButton, NSColor, NSFontAttributeName, NSForegroundColorAttributeName, NSScrollView, NSTextAlignment, NSView};
+use objc2_foundation::{NSMutableAttributedString, NSPoint, NSRange};
 
 const SECTIONS: &[(&str, &[(&str, &str)])] = &[
     ("노트 작성", &[
@@ -11,14 +11,17 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("잘라내기", "⌘X"), ("복사", "⌘C"), ("붙여넣기", "⌘V"), ("모두 선택", "⌘A"),
     ]),
     ("선택한 텍스트", &[
-        ("굵게", "⌘B"), ("기울임", "⌘I"), ("밑줄", "⌘U"), ("취소선", "⌘⇧S"),
-        ("인라인 코드", "⌘E"), ("링크 추가", "⌘K"),
+        ("굵게", "⌘B  /  **가**, __가__"), ("기울임", "⌘I  /  *가*, _가_"), ("밑줄", "⌘U"), ("취소선", "⌘⇧S  /  ~~텍스트~~"),
+        ("인라인 코드", "⌘E  /  `텍스트`"), ("링크 추가", "⌘K  /  [이름](주소)"),
     ]),
     ("문단과 블록", &[
-        ("일반 문단", "⌘⌥0"), ("제목 1 · 2 · 3", "⌘⌥1 · 2 · 3"), ("체크리스트", "⌘⌥4"),
-        ("불릿 목록", "⌘⌥5"), ("번호 목록", "⌘⌥6"), ("코드 블록", "⌘⌥8"),
+        ("일반 문단", "⌘⌥0"), ("제목 1", "⌘⌥1  /  # + Space"),
+        ("제목 2", "⌘⌥2  /  ## + Space"), ("제목 3", "⌘⌥3  /  ### + Space"),
+        ("체크리스트", "⌘⌥4  /  - [ ], - [x] + Space"),
+        ("불릿 목록", "⌘⌥5  /  -, *, + + Space"), ("번호 목록", "⌘⌥6  /  1. + Space"),
+        ("코드 블록", "⌘⌥8  /  ``` + Enter"),
         ("불릿 들여쓰기 · 내어쓰기", "Tab · ⇧Tab"), ("코드 블록에서 나가기", "⇧Enter"),
-        ("표 셀 적용", "Enter"), ("다음 셀 · 이전 셀", "Tab · ⇧Tab"),
+        ("표 셀 안에서 줄바꿈", "Enter"), ("다음 셀 · 이전 셀", "Tab · ⇧Tab"),
     ]),
     ("PDF 필기", &[
         ("필기 저장", "⌘S"), ("실행 취소 · 다시 실행", "⌘Z · ⌘⇧Z"),
@@ -59,7 +62,7 @@ pub unsafe fn new(close: &NSButton) -> Retained<NSView> {
     scroll.setDrawsBackground(false);
     scrollbar::style(&scroll);
     panel.addSubview(&scroll);
-    let document_height = SECTIONS.iter().map(|(_, rows)| 40. + rows.len() as f64 * 31.).sum::<f64>();
+    let document_height = SECTIONS.iter().map(|(_, rows)| 40. + rows.iter().map(|(_, keys)| if keys.contains('\n') { 46. } else { 31. }).sum::<f64>()).sum::<f64>();
     let document = view(rect(0., 0., document_width, document_height));
     let mut y = document_height;
     for &(heading, rows) in SECTIONS {
@@ -68,10 +71,37 @@ pub unsafe fn new(close: &NSButton) -> Retained<NSView> {
         label.setTextColor(Some(&theme::soft_selection_ink()));
         document.addSubview(&label);
         for (index, &(action, keys)) in rows.iter().enumerate() {
-            y -= 31.;
-            document.addSubview(&text_label(action, rect(8., y + 5., 183., 20.), 13., false));
-            let key = text_label(keys, rect(181., y + 5., document_width - 194., 20.), 13., true);
+            let row_height = if keys.contains('\n') { 46. } else { 31. };
+            y -= row_height;
+            let expanded = keys.contains("  /  ");
+            let key_x = if expanded { 100. } else { 181. };
+            document.addSubview(&text_label(action, rect(8., y + (row_height - 20.) / 2., key_x - 10., 20.), 13., false));
+            let key = text_label(keys, rect(key_x, y + 5., document_width - key_x - 13., row_height - 10.), 13., true);
             key.setAlignment(NSTextAlignment::Right);
+            if keys.contains('\n') { key.setMaximumNumberOfLines(2); }
+            if expanded {
+                let styled: Retained<NSMutableAttributedString> = msg_send![&key.attributedStringValue(), mutableCopy];
+                for (pattern, is_separator, offset) in [("  /  ", true, 2), (" + ", false, 1), ("\n+ ", false, 1)] {
+                    for (byte_index, _) in keys.match_indices(pattern) {
+                        let position = keys[..byte_index].encode_utf16().count() + offset;
+                        let range = NSRange::new(position, 1);
+                        if is_separator {
+                            let color = NSColor::colorWithSRGBRed_green_blue_alpha(0.357, 0.357, 0.839, 0.28);
+                            styled.addAttribute_value_range(NSForegroundColorAttributeName, &color, range);
+                            styled.addAttribute_value_range(NSFontAttributeName, &font::bold(14.), range);
+                        } else {
+                            styled.addAttribute_value_range(NSForegroundColorAttributeName, &NSColor::secondaryLabelColor(), range);
+                            styled.addAttribute_value_range(NSFontAttributeName, &font::bold(11.5), range);
+                        }
+                    }
+                }
+                for (byte_index, _) in keys.match_indices(',') {
+                    let range = NSRange::new(keys[..byte_index].encode_utf16().count(), 1);
+                    styled.addAttribute_value_range(NSForegroundColorAttributeName, &NSColor::secondaryLabelColor(), range);
+                    styled.addAttribute_value_range(NSFontAttributeName, &font::bold(10.), range);
+                }
+                key.setAttributedStringValue(&styled);
+            }
             document.addSubview(&key);
             let section_end = index + 1 == rows.len();
             let thickness = if section_end { 2. } else { 1. };

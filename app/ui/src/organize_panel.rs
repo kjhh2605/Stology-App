@@ -252,8 +252,6 @@ impl Panel {
         self.status.setStringValue(&NSString::from_str(text));
         let color = if error { NSColor::systemRedColor() } else { NSColor::secondaryLabelColor() };
         self.status.setTextColor(Some(&color));
-        let tooltip = (!text.is_empty()).then(|| NSString::from_str(text));
-        self.status.setToolTip(tooltip.as_deref());
     }
 
     unsafe fn update_enabled(&self) {
@@ -302,7 +300,6 @@ impl Panel {
             };
             let label = text_label(&message, rect(10., 8., WIDTH - 20., 20.), 12., true);
             label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-            label.setToolTip(Some(&NSString::from_str(&message)));
             box_view.addSubview(&label);
             self.resume.setFrame(rect(WIDTH - 128., 32., 118., 26.));
             box_view.addSubview(&self.resume);
@@ -355,7 +352,6 @@ impl Panel {
                 let text = format!("{title} — {detail}");
                 let label = text_label(&text, rect(0., index as f64 * 24., WIDTH - 22., 22.), 12., false);
                 label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-                label.setToolTip(Some(&NSString::from_str(&text)));
                 let color = if target { NSColor::labelColor() } else { NSColor::secondaryLabelColor() };
                 label.setTextColor(Some(&color));
                 list.addSubview(&label);

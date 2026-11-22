@@ -281,7 +281,6 @@ impl Controller {
                 else if needs_node { "Codex 설치에 Node.js와 npm이 필요합니다.\n자동 설치는 Stology 전용 공간을 사용합니다.".into() }
                 else { "설치된 CLI의 실행 환경을 확인해 주세요.".into() };
             r.notice_body.setStringValue(&NSString::from_str(&body));
-            r.notice_body.setToolTip(state["setup_job"]["error"].as_str().map(NSString::from_str).as_deref());
             r.node_manual.setHidden(node_busy || !needs_node);
             r.node_auto.setHidden(!needs_node && !node_busy);
             r.node_check.setHidden(node_busy);

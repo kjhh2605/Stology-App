@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 stology-core = { path = "../core" }
 objc2 = "0.6"
+block2 = { version = "0.6", default-features = false, features = ["alloc"] }
 objc2-foundation = { version = "0.3", features = ["NSTimer", "NSRunLoop", "NSString", "NSArray", "NSDictionary", "NSGeometry", "NSNotification", "NSThread", "NSValue"] }
 objc2-app-kit = "0.3"
 serde_json = { version = "1", features = ["float_roundtrip"] }

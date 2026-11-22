@@ -876,7 +876,7 @@ impl State {
         b
     }
     /// 판 없는 글자 버튼 하나. 오른쪽 끝이 `right`이고 폭을 돌려준다.
-    unsafe fn link_button(&mut self, parent: &NSView, title: &str, right: f64, y: f64, action: Action, ink: &NSColor, tip: Option<&str>) -> f64 {
+    unsafe fn link_button(&mut self, parent: &NSView, title: &str, right: f64, y: f64, action: Action, ink: &NSColor, _tip: Option<&str>) -> f64 {
         let b = NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(&self.target), Some(sel!(action:)), mtm());
         b.setBordered(false);
         let text = NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &NSString::from_str(title));
@@ -887,9 +887,7 @@ impl State {
         let w = b.attributedTitle().size().width.ceil() + 8.;
         b.setFrame(rect(right - w, y, w, 20.));
         b.setTag(self.register(action));
-        if let Some(tip) = tip {
-            b.setToolTip(Some(&NSString::from_str(tip)));
-        }
+
         parent.addSubview(&b);
         w
     }
@@ -1210,7 +1208,6 @@ impl State {
     unsafe fn update_tab_dot(&self) {
         let dot = self.suggestions["unseen"] == true && self.chat_mode;
         self.tab_dot.setHidden(!dot);
-        self.right_tabs[0].setToolTip(dot.then(|| NSString::from_str("자료 · 새 정리 제안이 있어요")).as_deref());
         let _: () = msg_send![&self.right_tabs[0], setAccessibilityLabel: &*NSString::from_str(if dot { "자료 · 새 정리 제안 있음" } else { "자료" })];
     }
     /// 파일 검색 옆 ✦ 버튼. 제안 개수는 아이콘 오른쪽 위의 작은 원으로 보인다.
@@ -1229,7 +1226,6 @@ impl State {
             (0, false) => "정리 제안 없음".to_owned(),
             (n, _) => format!("정리 제안 {n}개"),
         };
-        b.setToolTip(Some(&NSString::from_str(&label)));
         let _: () = msg_send![&b, setAccessibilityLabel: &*NSString::from_str(&label)];
         if count > 0 {
             let text = if count > 9 { "9+".to_owned() } else { count.to_string() };
@@ -1315,8 +1311,6 @@ impl State {
             let draft = s["state"] == "draft";
             let name = text_label(&strv(s, "title"), rect(0., y, width, 17.), 12., true);
             name.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-            let asked = s["questions"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
-            name.setToolTip(Some(&NSString::from_str(&format!("{}\n\n물은 질문:\n{asked}", strv(s, "title")))));
             body.addSubview(&name);
             y += 21.;
             let chip_text = suggestion_chip(s);
@@ -1427,7 +1421,6 @@ impl State {
         );
         // 이미 캡슐에 여백이 있으므로 버튼 셀에 캡슐 전체 폭을 준다.
         organize.setFrame(rect(0., 0., button_w, button_h));
-        organize.setToolTip(Some(&NSString::from_str("이 과목의 자료를 정리해요")));
         if self.job.is_some() || self.pending.is_some() || resumable || !has_materials {
             organize.setEnabled(false);
             organize.setAlphaValue(0.45);
@@ -1560,7 +1553,6 @@ impl State {
         label.setMaximumNumberOfLines(2);
         label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
         label.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        label.setToolTip(Some(&NSString::from_str(&text)));
         right.addSubview(&label);
         self.organize_label = Some(label);
         height
@@ -2231,7 +2223,6 @@ impl State {
                     self.set_status(&format!(
                         "제목 수정 실패 · {error} · 다른 이름을 입력하거나 Esc로 취소하세요"
                     ));
-                    self.header.setToolTip(Some(&NSString::from_str(&error)));
                     self.header.setStringValue(&NSString::from_str(&title));
                     self.header.selectText(None);
                     return false;
@@ -2242,7 +2233,6 @@ impl State {
         self.header.abortEditing();
         self.header.setEditable(false);
         self.header.setSelectable(false);
-        self.header.setToolTip(None);
         self.set_status(if commit {
             "노트 제목을 저장했습니다 · 변경 사항은 자동 저장됩니다"
         } else {
@@ -3218,13 +3208,11 @@ impl State {
             if let Some(image) = theme::palette_icon(symbol, 14., &color, &body) {
                 b.setImage(Some(&image));
             }
-            b.setToolTip(None);
             let _: () = msg_send![&**b, setAccessibilityValue: &*detail];
         }
         if let Some(help) = &self.connect_help {
             help.setStringValue(&NSString::from_str(&text));
             help.setTextColor(Some(&color));
-            help.setToolTip(None);
             help.setAlphaValue(1.);
         }
     }
@@ -3624,9 +3612,7 @@ impl State {
                         strv(r, "label"),
                         count
                     )));
-                    if let Some(item) = p.itemAtIndex(i as isize + 1) {
-                        item.setToolTip(Some(&NSString::from_str(&strv(r, "definition"))));
-                    }
+
                 }
             }
             p.selectItemAtIndex(old.max(0).min(p.numberOfItems() - 1));
@@ -3696,7 +3682,6 @@ impl State {
         );
         import.setImageHugsTitle(false);
         import.setAlignment(NSTextAlignment::Center);
-        import.setToolTip(Some(&NSString::from_str("자료 추가하기")));
         import.setAccessibilityLabel(Some(&NSString::from_str("자료 추가하기")));
         let subject = self.graph_data["layer"] == "subject";
         let mut top = h - 62.;
@@ -3706,7 +3691,6 @@ impl State {
         cleanup.setImageHugsTitle(false);
         cleanup.setAlignment(NSTextAlignment::Center);
         let label = NSString::from_str(if reviewing { "AI 삭제 후보 검토 중" } else { "AI 삭제 후보 검토" });
-        cleanup.setToolTip(Some(&label));
         cleanup.setAccessibilityLabel(Some(&label));
         cleanup.setEnabled(!reviewing && self.graph_data["concepts"].as_array().is_some_and(|c| !c.is_empty()));
         if self.job.is_some() || self.pending.is_some() {
@@ -3829,7 +3813,6 @@ impl State {
                 field.setDrawsBackground(false);
                 field.setIdentifier(Some(&NSString::from_str("concept-desc")));
                 field.setDelegate(Some(ProtocolObject::from_ref(&*self.target)));
-                field.setToolTip(Some(&NSString::from_str("문장을 클릭해 고칠 수 있어요. 다시 정리해도 바뀌지 않아요.")));
                 if edited {
                     let marker = wrapped(&list, "(수정됨)", 20., &mut y, w - 40., 10.5, false, 1);
                     marker.setTextColor(Some(&NSColor::tertiaryLabelColor()));
@@ -3851,8 +3834,6 @@ impl State {
                     title.addAttribute_value_range(NSForegroundColorAttributeName, &NSColor::colorWithSRGBRed_green_blue_alpha(0.30, 0.27, 0.78, 1.), range);
                     title.addAttribute_value_range(NSFontAttributeName, &font::regular(10.5), range);
                     b.setAttributedTitle(&title);
-                    let original = strv(&concept, "original_definition");
-                    b.setToolTip(Some(&NSString::from_str(&format!("원문\n{original}"))));
                     list.addSubview(&b);
                 }
                 y -= 4.;
@@ -3928,7 +3909,6 @@ impl State {
                         item.setTag(self.register(Action::DeleteLink(l.clone())));
                         menu.addItem(&item);
                         b.setMenu(Some(&menu));
-                        b.setToolTip(Some(&NSString::from_str(&sentence)));
                         y -= 3.;
                         if dashed {
                             wrapped(&list, &format!("정리하며 이음 · {}", strv(l, "reason")), 30., &mut y, w - 50., 10.5, false, 3)
@@ -3971,7 +3951,6 @@ impl State {
                         wrapped(&list, &strv(m, "definition"), 20., &mut y, w - 40., 10.5, false, 2).setTextColor(Some(&NSColor::secondaryLabelColor()));
                         y -= 24.;
                         let b = self.glass(&list, "따로 떼기", rect(w - 16. - 110., y, 110., 24.), Action::Unmerge(strv(m, "id")), theme::Glass::Clear, None);
-                        b.setToolTip(Some(&NSString::from_str("이 이름을 다시 별개의 개념으로 되돌려요. 다음 정리에서도 합치지 않아요.")));
                         y -= 8.;
                     }
                 }
@@ -4042,7 +4021,6 @@ impl State {
                 let b = self.glass(&list, &title, rect(16., y, inner, 28.), Action::Evidence(e), theme::Glass::Clear, Some("quote"));
                 b.setAlignment(NSTextAlignment::Left);
                 b.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
-                b.setToolTip(Some(&NSString::from_str(&title)));
                 y -= 3.;
                 wrapped(&list, &quote, 20., &mut y, w - 44., 11., false, 4).setSelectable(true);
                 y -= 4.;
@@ -4075,7 +4053,6 @@ impl State {
                     b.setContentTintColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(r, g, bl, 1.)));
                     b.setAlignment(NSTextAlignment::Left);
                     b.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-                    b.setToolTip(Some(&NSString::from_str(&strv(u, "description"))));
                     if focused {
                         let _: () = msg_send![&b, setAccessibilityValue: &*NSString::from_str("선택됨")];
                     }
@@ -4983,7 +4960,6 @@ impl State {
                             self.set_status(&label);
                             if let Some(strip) = &self.organize_label {
                                 strip.setStringValue(&NSString::from_str(&label));
-                                strip.setToolTip(Some(&NSString::from_str(&label)));
                             }
                         }
                     }
@@ -5133,8 +5109,6 @@ impl State {
             button.setFrame(rect(4. + tab_width * i as f64, 4., tab_width, 32.));
             button.setImagePosition(if compact { NSCellImagePosition::ImageOnly }
                 else { NSCellImagePosition::ImageLeading });
-            let title = button.title();
-            button.setToolTip(if compact { Some(&title) } else { None });
         }
     }
     unsafe fn layout(&mut self, size: NSSize) {
@@ -5362,7 +5336,6 @@ unsafe fn menu(app: &NSApplication, target: &Delegate) {
 unsafe fn shortcut_icon(button: &NSButton, symbol: &str, label: &str) {
     let label = NSString::from_str(label);
     button.setBordered(false);
-    button.setToolTip(Some(&label));
     button.setAccessibilityLabel(Some(&label));
     let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), Some(&label));
     button.setImage(image.as_deref());
@@ -5585,7 +5558,6 @@ fn main() {
                     new_note.setImage(Some(&image));
                     new_note.setImagePosition(NSCellImagePosition::ImageOnly);
                 }
-                new_note.setToolTip(Some(&NSString::from_str("새 노트 (⌘N)")));
                 new_note.setAccessibilityLabel(Some(&NSString::from_str("새 노트")));
                 new_note.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin | NSAutoresizingMaskOptions::ViewMinXMargin);
                 titlebar.addSubview(&new_note);
@@ -5605,7 +5577,6 @@ fn main() {
                     toggle.setImage(Some(&image));
                     toggle.setImagePosition(NSCellImagePosition::ImageOnly);
                 }
-                toggle.setToolTip(Some(&NSString::from_str(label)));
                 toggle.setAccessibilityLabel(Some(&NSString::from_str(label)));
                 toggle.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin | if side == 1 { NSAutoresizingMaskOptions::ViewMinXMargin } else { NSAutoresizingMaskOptions::empty() });
                 titlebar.addSubview(&toggle);

@@ -59,7 +59,6 @@ define_class!(
                 cell.addSubview(&icon);
                 cell.setImageView(Some(&icon));
             }
-            cell.setToolTip(Some(&NSString::from_str(if p.is_empty() { title } else { &p })));
             let _: () = msg_send![&cell, setAccessibilityLabel: &*NSString::from_str(title)];
             Some(cell.into_super())
         }

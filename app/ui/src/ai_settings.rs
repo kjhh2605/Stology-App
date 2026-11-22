@@ -307,8 +307,6 @@ impl SettingsWindow {
     unsafe fn status(&mut self, message: &str, error: bool) {
         self.status_error = error;
         self.status.setStringValue(&NSString::from_str(message));
-        let tooltip = NSString::from_str(message);
-        self.status.setToolTip(if message.is_empty() { None } else { Some(&tooltip) });
         let color = if error { NSColor::systemRedColor() } else { NSColor::secondaryLabelColor() };
         self.status.setTextColor(Some(&color));
     }
@@ -417,7 +415,6 @@ impl SettingsWindow {
                     format!("고친 방법 사용 중: {}", customized.join(", "))
                 };
                 self.skills.setStringValue(&NSString::from_str(&summary));
-                self.skills.setToolTip(Some(&NSString::from_str(&summary)));
                 self.reset.setEnabled(result["user_copy"].as_bool() == Some(true));
                 let mut errors = Vec::new();
                 if let Some(error) = result["routing_error"].as_str().filter(|error| !error.is_empty()) {

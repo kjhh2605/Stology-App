@@ -214,7 +214,7 @@ struct EditorState {
     base_directory: RefCell<Option<PathBuf>>,
     code_panels: RefCell<Vec<NSRect>>,
     line_numbers: RefCell<Vec<(String, NSPoint)>>,
-    list_labels: RefCell<Vec<(String, NSPoint)>>,
+    list_labels: RefCell<Vec<(String, NSPoint, f64)>>,
     quote_bars: RefCell<Vec<NSRect>>,
     rule_bars: RefCell<Vec<NSRect>>,
 }
@@ -241,6 +241,15 @@ define_class!(
                 }
                 let selection: NSRange = msg_send![self, selectedRange];
                 let effective = if range.location > self.string().length() { selection } else { range };
+                if effective.length == 0 && !value_string.to_string().starts_with(['\n','\r','|']) {
+                    let source = self.string().to_string();
+                    let at = byte_for_utf16(&source,effective.location);
+                    if after_grid_line(&source, at) {
+                        let replacement = format!("\n{}", value_string);
+                        let _: () = msg_send![super(self), insertText:&*NSString::from_str(&replacement), replacementRange:effective];
+                        return;
+                    }
+                }
                 if effective.length == 0 && !self.ivars().pasting.get() {
                     let source = self.string().to_string();
                     let caret = byte_for_utf16(&source, effective.location);
@@ -281,6 +290,15 @@ define_class!(
         #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
         fn set_image_safe_marked_text(&self, value: &AnyObject, selected: NSRange, range: NSRange) { unsafe {
             if self.isEditable() {
+                let selection:NSRange = msg_send![self,selectedRange];
+                let effective = if range.location > self.string().length() {selection} else {range};
+                let source = self.string().to_string();
+                let marked:bool = msg_send![self,hasMarkedText];
+                if !marked && effective.length == 0 && after_grid_line(&source,byte_for_utf16(&source,effective.location)) {
+                    let _:() = msg_send![super(self),insertText:&*NSString::from_str("\n"),replacementRange:effective];
+                    let _:() = msg_send![super(self),setMarkedText:value,selectedRange:selected,replacementRange:NSRange::new(usize::MAX,0)];
+                    return;
+                }
                 if let Some((replacement,caret))=image_edit::replacing_selected_text(self,"",range) {
                     self.breakUndoCoalescing();
                     let _: ()=msg_send![super(self),insertText:&*NSString::from_str(&replacement),replacementRange:NSRange::new(0,self.string().length())];
@@ -353,7 +371,7 @@ define_class!(
             let _: () = msg_send![super(self), moveLeft:sender];
             skip_heading_marker(self, true);
             skip_block_marker(self, true);
-            skip_inline_marker(self, true);
+            skip_inline_marker(self, true,inline_syntax);
             skip_code_fence(self, true);
         }}
         #[unsafe(method(moveRight:))]
@@ -361,7 +379,7 @@ define_class!(
             let _: () = msg_send![super(self), moveRight:sender];
             skip_heading_marker(self, false);
             skip_block_marker(self, false);
-            skip_inline_marker(self, false);
+            skip_inline_marker(self, false,inline_syntax);
             skip_code_fence(self, false);
         }}
         #[unsafe(method(moveUp:))]
@@ -409,9 +427,9 @@ define_class!(
             for (number, point) in self.ivars().line_numbers.borrow().iter() {
                 NSString::from_str(number).drawAtPoint_withAttributes(*point, Some(&attrs));
             }
-            let font = crate::font::regular(16.0);
-            let attrs = NSDictionary::from_slices(&[NSFontAttributeName, NSForegroundColorAttributeName], &[&*font as &AnyObject, &*color as &AnyObject]);
-            for (label, point) in self.ivars().list_labels.borrow().iter() {
+            for (label, point, size) in self.ivars().list_labels.borrow().iter() {
+                let font = crate::font::regular(*size);
+                let attrs = NSDictionary::from_slices(&[NSFontAttributeName, NSForegroundColorAttributeName], &[&*font as &AnyObject, &*color as &AnyObject]);
                 NSString::from_str(label).drawAtPoint_withAttributes(*point, Some(&attrs));
             }
             NSColor::colorWithSRGBRed_green_blue_alpha(0.48, 0.49, 0.54, 1.0).setFill();
@@ -433,7 +451,7 @@ define_class!(
         }}
         #[unsafe(method(deleteBackward:))]
         fn delete_backward(&self, sender: Option<&AnyObject>) { unsafe {
-            if !input_command(self, markdown_input::Command::Backspace) && !heading_backspace(self) && !inline_backspace(self) {
+            if !input_command(self, markdown_input::Command::Backspace) && !heading_backspace(self) && !inline_backspace(self,inline_syntax) {
                 let _: () = msg_send![super(self), deleteBackward:sender];
             }
         }}
@@ -573,6 +591,16 @@ fn toggle_format(
     markdown_shortcuts::wrap(source, selection, open, close)
 }
 
+fn inline_marks(event: &NSEvent) -> Option<(&'static str,&'static str)> {
+    let flags = event.modifierFlags();
+    if !flags.contains(NSEventModifierFlags::Command) || flags.intersects(NSEventModifierFlags::Option | NSEventModifierFlags::Control) { return None; }
+    match (event.keyCode(),flags.contains(NSEventModifierFlags::Shift)) {
+        (11,false) => Some(("**","**")), (34,false) => Some(("*","*")),
+        (32,false) => Some(("<u>","</u>")), (1,true) => Some(("~~","~~")),
+        (14,false) => Some(("`","`")), _ => None,
+    }
+}
+
 /// Matches physical QWERTY keys as well as characters so Korean input sources
 /// use the same shortcuts. System cut/copy/paste remain native responder actions.
 unsafe fn formatting_shortcut(text: &NSTextView, event: &NSEvent) -> bool {
@@ -608,18 +636,7 @@ unsafe fn formatting_shortcut(text: &NSTextView, event: &NSEvent) -> bool {
     } else {
         None
     };
-    let marks = if !option {
-        match (key, shift) {
-            (11, false) => Some(("**", "**")),
-            (34, false) => Some(("*", "*")),
-            (32, false) => Some(("<u>", "</u>")),
-            (1, true) => Some(("~~", "~~")),
-            (14, false) => Some(("`", "`")),
-            _ => None,
-        }
-    } else {
-        None
-    };
+    let marks = inline_marks(event);
     let link = key == 40 && !option && !shift && selection.length > 0;
     if block.is_none() && marks.is_none() && !link {
         return false;
@@ -848,14 +865,14 @@ unsafe fn previous_composed_character(source: &str, end: usize) -> Option<Range<
             ..byte_for_utf16(source, range.location + range.length),
     )
 }
-unsafe fn inline_backspace(text: &NSTextView) -> bool {
+unsafe fn inline_backspace(text: &NSTextView, syntax_for:fn(&str)->Vec<InlineSyntax>) -> bool {
     let marked: bool = msg_send![text, hasMarkedText];
     let selection: NSRange = msg_send![text, selectedRange];
     if marked || !text.isEditable() || selection.length != 0 {
         return false;
     }
     let source = text.string().to_string();
-    let syntax = inline_syntax(&source);
+    let syntax = syntax_for(&source);
     let markers = inline_marker_ranges(&syntax);
     let caret = byte_for_utf16(&source, selection.location);
     let mut end = caret;
@@ -894,14 +911,14 @@ unsafe fn inline_backspace(text: &NSTextView) -> bool {
 
 // Called after native left/right movement. A key moves by one visible composed
 // character, never leaving the insertion point in hidden emphasis/link syntax.
-unsafe fn skip_inline_marker(text: &NSTextView, backwards: bool) {
+unsafe fn skip_inline_marker(text: &NSTextView, backwards: bool, syntax_for:fn(&str)->Vec<InlineSyntax>) {
     let marked: bool = msg_send![text, hasMarkedText];
     let selection: NSRange = msg_send![text, selectedRange];
     if marked || selection.length != 0 {
         return;
     }
     let source = text.string().to_string();
-    let markers = inline_marker_ranges(&inline_syntax(&source));
+    let markers = inline_marker_ranges(&syntax_for(&source));
     let caret = byte_for_utf16(&source, selection.location);
     let Some(marker) = markers.iter().find(|range| {
         if backwards {
@@ -1013,6 +1030,7 @@ const EDITOR_INSET: f64 = 25.0;
 const LINE_PADDING: f64 = 5.0;
 
 pub unsafe fn make_editor(frame: NSRect) -> (Retained<NSScrollView>, Retained<NSTextView>) {
+    install_grid_context_filter();
     let mtm = MainThreadMarker::new().expect("editor must be created on main thread");
     let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), frame);
     scroll.setHasVerticalScroller(true);
@@ -1207,7 +1225,7 @@ fn range_active(range: NSRange, source: &str, active: Option<&Range<usize>>) -> 
         active,
     )
 }
-unsafe fn apply_font_trait(storage: &NSTextStorage, range: NSRange, trait_mask: NSFontTraitMask) {
+unsafe fn apply_font_trait(storage: &objc2_foundation::NSMutableAttributedString, range: NSRange, trait_mask: NSFontTraitMask) {
     let manager = NSFontManager::sharedFontManager(MainThreadMarker::new().unwrap());
     let mut cursor = range.location;
     let end = range.location + range.length;
@@ -1353,13 +1371,16 @@ fn hidden_syntax(source: &str, active: Option<&Range<usize>>) -> Vec<Range<usize
 // Read layout-fragment coordinates rather than IME candidate rectangles.
 // firstRectForCharacterRange may return an upstream visible glyph for a fully
 // concealed run, which places overlays on the preceding paragraph.
-unsafe fn layout_fragment_rect(text: &NSTextView, index: usize) -> Option<NSRect> {
+unsafe fn layout_fragment(text: &NSTextView, index: usize) -> Option<Retained<NSTextLayoutFragment>> {
     let manager = text.textLayoutManager()?;
     let content = manager.textContentManager()?;
     let document = content.documentRange();
     let location = content.locationFromLocation_withOffset(&document.location(), index as isize)?;
-    let fragment = manager.textLayoutFragmentForLocation(&location)?;
-    let frame = fragment.layoutFragmentFrame();
+    manager.textLayoutFragmentForLocation(&location)
+}
+
+unsafe fn layout_fragment_rect(text: &NSTextView, index: usize) -> Option<NSRect> {
+    let frame = layout_fragment(text, index)?.layoutFragmentFrame();
     let origin = text.textContainerOrigin();
     Some(NSRect::new(
         NSPoint::new(origin.x + frame.origin.x, origin.y + frame.origin.y),
@@ -1410,6 +1431,9 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
         native.ivars().rule_bars.borrow_mut().clear();
     }
     let source = text.string().to_string();
+    let grid_focus = text.window().and_then(|w| w.firstResponder()).and_then(|r| r.downcast::<InlineTable>().ok()).filter(|v|v.superview().is_some_and(|p|std::ptr::eq(&*p,text as &NSView))).map(|v| {
+        (v.ivars().range.get().location,v.cells().iter().filter(|c|c.ivars().selected.get()).map(|c|c.position()).collect::<Vec<_>>())
+    });
     for child in text.subviews() {
         let inline: bool = msg_send![&*child, isKindOfClass: InlineImage::class()];
         let table: bool = msg_send![&*child, isKindOfClass: InlineTable::class()];
@@ -1621,25 +1645,27 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
     }
     let tables = table_previews(&source)
         .into_iter()
-        .filter(|table| preview.is_some_and(|p| p.start == table.bytes.start) || !intersects(&table.bytes, active.as_ref()))
+        .filter(|table| preview.as_ref().is_some_and(|p| p.start == table.bytes.start) || !intersects(&table.bytes, active.as_ref()))
         .map(|mut table| {
-            if let Some(size) = preview.filter(|p| p.start == table.bytes.start) {
+            if let Some(size) = preview.as_ref().filter(|p| p.start == table.bytes.start) {
                 size.apply(&mut table);
             }
             table
         })
         .collect::<Vec<_>>();
+    let handle_room = if text.isEditable() { TABLE_HANDLE_SIZE } else { 0.0 };
+    let mut terminal_separator = None;
     for table in &tables {
         conceal(&storage, utf16_range(&source, table.bytes.clone()), true);
-        let paragraph = NSMutableParagraphStyle::new();
-        paragraph.setMinimumLineHeight(0.01);
-        paragraph.setMaximumLineHeight(0.01);
-        paragraph.setParagraphSpacing(table.height() + if text.isEditable() { 34.0 } else { 12.0 });
-        storage.addAttribute_value_range(
-            NSParagraphStyleAttributeName,
-            &paragraph,
-            table.anchor(&source),
-        );
+        // GFM needs a blank separator before prose. Reserve space for the
+        // table and its controls, but don't draw that separator as a text row.
+        if let Some(separator) = table.separator_line(&source) {
+            if text.isEditable() && separator.end == source.len() {
+                terminal_separator = Some((table, utf16_range(&source, separator.clone()).location));
+            }
+            conceal(&storage, utf16_range(&source, separator), true);
+        }
+        style_table_anchor(&storage, &source, table, handle_room, 0.0);
     }
     storage.endEditing();
     // Never inherit transparent/tiny attributes from a concealed syntax run.
@@ -1659,15 +1685,29 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
         &[&*typing_font as &AnyObject, &*ink as &AnyObject],
     );
     text.setTypingAttributes(&typing);
-    if let Some(undo) = &undo {
-        let _: () = msg_send![undo, enableUndoRegistration];
-    }
     // Attribute edits can invalidate multiple downstream TextKit 2 fragments.
     // Complete that reflow synchronously before attaching views to fragments.
     if let Some(manager) = text.textLayoutManager() {
         if let Some(content) = manager.textContentManager() {
-            manager.ensureLayoutForRange(&content.documentRange());
+            let document = content.documentRange();
+            manager.ensureLayoutForRange(&document);
+            if let Some((table, separator)) = terminal_separator {
+                // TextKit places the extra line for the end-of-document caret
+                // below a terminal separator even when that separator is
+                // collapsed. Count its offset toward the row handle's space.
+                if let Some(fragment) = layout_fragment(text, separator) {
+                    let lines = fragment.textLineFragments();
+                    if lines.count() > 1 {
+                        let inset = lines.lastObject().unwrap().typographicBounds().origin.y;
+                        style_table_anchor(&storage, &source, table, handle_room, inset);
+                        manager.ensureLayoutForRange(&document);
+                    }
+                }
+            }
         }
+    }
+    if let Some(undo) = &undo {
+        let _: () = msg_send![undo, enableUndoRegistration];
     }
     if let Some(native) = native {
         for rule in &rules {
@@ -1685,13 +1725,15 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 continue;
             };
             if let Some(label) = &block.label {
+                let size = if label == "•" { (28.0_f64 - 4.0 * block.list_depth as f64).max(16.0) } else { 16.0 };
                 let width = label.chars().count() as f64 * 9.0;
                 native.ivars().list_labels.borrow_mut().push((
                     label.clone(),
                     NSPoint::new(
                         EDITOR_INSET + LINE_PADDING + block.indent - width - 8.0,
-                        frame.origin.y + if label == "•" { 3.0 } else { 1.0 },
+                        frame.origin.y + if label == "•" { 3.0 - (size - 16.0) / 2.0 } else { 1.0 },
                     ),
+                    size,
                 ));
             }
             for depth in 0..block.quote_depth {
@@ -1834,7 +1876,6 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             button.setBordered(false);
             button.setFont(Some(&crate::font::regular(13.0)));
             button.setEnabled(text.isEditable());
-            button.setToolTip(Some(&NSString::from_str("코드 언어 선택")));
             button.setTarget(Some(&button));
             button.setAction(Some(sel!(changeLanguage:)));
             text.addSubview(&button);
@@ -1918,7 +1959,6 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             checkbox.setButtonType(NSButtonType::Switch);
             checkbox.setState(if checked { 1 } else { 0 });
             checkbox.setEnabled(text.isEditable());
-            checkbox.setToolTip(Some(&NSString::from_str("Markdown 체크리스트 상태 변경")));
             checkbox.setTarget(Some(&checkbox));
             checkbox.setAction(Some(sel!(toggle:)));
             text.addSubview(&checkbox);
@@ -1927,16 +1967,18 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             let Some(local) = layout_fragment_rect(text, table.anchor(&source).location) else {
                 continue;
             };
-            let handle_room = if text.isEditable() { 22.0 } else { 0.0 };
             let columns = table.rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
             // 열은 고정 너비로 늘어나고, 본문 폭을 넘으면 그 안에서 고르게 나눈다.
             let available = (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0).max(80.0) - handle_room;
             let cell_width = TABLE_COLUMN_WIDTH.min(available / columns as f64);
-            let grid_width = cell_width * columns as f64;
+            let mut widths: Vec<_> = (0..columns).map(|c| table.column_width(c, cell_width)).collect();
+            let scale = (available / widths.iter().sum::<f64>()).min(1.);
+            for width in &mut widths { *width *= scale; }
+            let grid_width = widths.iter().sum::<f64>();
             let width = grid_width + handle_room;
             let frame = NSRect::new(
-                NSPoint::new(EDITOR_INSET, local.origin.y + 6.0),
-                NSSize::new(width, table.height() + if text.isEditable() { 22.0 } else { 0.0 }),
+                NSPoint::new(EDITOR_INSET, local.origin.y + TABLE_TOP_PADDING),
+                NSSize::new(width, table.height() + handle_room),
             );
             let allocated = InlineTable::alloc(mtm).set_ivars(InlineTableState {
                 text: Weak::new(text),
@@ -1945,39 +1987,48 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             });
             let view: Retained<InlineTable> = msg_send![super(allocated),initWithFrame:frame];
             if text.isEditable() {
-                add_table_handle(&view, true, NSRect::new(NSPoint::new(grid_width, 0.0), NSSize::new(22.0, table.height())));
-                add_table_handle(&view, false, NSRect::new(NSPoint::new(0.0, table.height()), NSSize::new(grid_width, 22.0)));
+                add_table_handle(&view, true, NSRect::new(NSPoint::new(grid_width, 0.0), NSSize::new(handle_room, table.height())));
+                add_table_handle(&view, false, NSRect::new(NSPoint::new(0.0, table.height()), NSSize::new(grid_width, handle_room)));
             }
+            let mut y = 0.;
             let mut previous_cell: Option<Retained<TableCell>> = None;
             for (row_index, row) in table.rows.iter().enumerate() {
+                let mut x = 0.;
+                let height = table.row_height(row_index);
                 for (column, contents) in row.iter().enumerate() {
                     let cell_range = table.cell_ranges[row_index][column].clone();
                     let allocated = TableCell::alloc(mtm).set_ivars(TableCellState {
                         text: Weak::new(text),
                         range: std::cell::Cell::new(utf16_range(&source, cell_range.clone())),
                         fingerprint: std::cell::Cell::new(fingerprint(&source)),
+                        row: row_index, column, selected: Default::default(),
                         original_display: RefCell::new(contents.clone()),
+                        editing_markdown: Default::default(),
+                        markdown: RefCell::new(grid_editable_source(&source[cell_range.clone()])),
                         committing: std::cell::Cell::new(false),
                         needs_layout: std::cell::Cell::new(false),
                     });
                     let cell: Retained<TableCell> = msg_send![super(allocated), initWithFrame:NSRect::new(
-                        NSPoint::new(column as f64 * cell_width, row_index as f64 * 30.0),
-                        NSSize::new(cell_width - 1.0, 29.0),
+                        NSPoint::new(x, y),
+                        NSSize::new(widths[column] - 1.0, height - 1.0),
                     )];
+                    x += widths[column];
+                    let centered: Retained<GridFieldCell> = msg_send![GridFieldCell::alloc(mtm), initTextCell:&*NSString::from_str(contents)];
+                    centered.setUsesSingleLineMode(false);
+                    centered.setWraps(true);
+                    cell.setCell(Some(&centered));
+                    cell.setAlignment(table.alignment(row_index, column));
                     cell.setStringValue(&NSString::from_str(contents));
                     cell.setBezeled(false);
                     // Parser-inserted missing cells have no actual source slot.
                     // Keep those selectable instead of corrupting another row.
                     cell.setEditable(
-                        text.isEditable() && table_cell_has_source_slot(&source, &cell_range),
+                        text.isEditable() && ((row_index == 0 && column == 0 && table.marker.is_some()) || table_cell_has_source_slot(&source, &cell_range)),
                     );
                     cell.setSelectable(true);
                     cell.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*cell)));
                     cell.setTarget(Some(&cell));
                     cell.setAction(Some(sel!(commitCell:)));
-                    cell.setToolTip(Some(&NSString::from_str(
-                        "셀 편집 · Enter로 적용 · Tab으로 다음 셀",
-                    )));
                     cell.setDrawsBackground(true);
                     cell.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
                         if row_index == 0 { 0.91 } else { 0.97 },
@@ -1992,14 +2043,23 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                     };
                     cell.setFont(Some(&font));
                     cell.setTextColor(Some(&ink));
+                    render_grid_cell(&cell, &table);
                     if let Some(previous) = &previous_cell {
                         previous.setNextKeyView(Some(&cell));
                     }
                     previous_cell = Some(cell.clone());
                     view.addSubview(&cell);
                 }
+                y += height;
             }
+            if text.isEditable() { add_grid_dividers(&view, &widths, &table); }
             text.addSubview(&view);
+            if let Some((_,selected)) = grid_focus.as_ref().filter(|(at,_)|*at == view.ivars().range.get().location) {
+                if let (Some(a),Some(b)) = (selected.first(),selected.last()) {
+                    view.select(*a,*b);
+                    if let Some(w) = view.window() {w.makeFirstResponder(Some(&view));}
+                }
+            }
         }
         for (spec, frame) in image_specs.into_iter().zip(image_frames) {
             let Some(frame) = frame else {
@@ -2016,9 +2076,6 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             let image_view: Retained<InlineImage> = msg_send![super(allocated),initWithFrame:frame];
             image_view.setImage(Some(&spec.image));
             image_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
-            image_view.setToolTip(Some(&NSString::from_str(
-                "드래그: 가로 위치 · 모서리/상하좌우 가장자리: 크기 · 우클릭: 삭제/배치",
-            )));
             image_view.setAccessibilityLabel(Some(&NSString::from_str(
                 "노트 이미지 · 모서리와 가장자리로 크기 조절 · 우클릭으로 삭제",
             )));
@@ -2104,10 +2161,13 @@ define_class!(
 use objc2_foundation::NSObjectProtocol;
 
 struct TableCellState {
+    row: usize, column: usize, selected: std::cell::Cell<bool>,
     text: Weak<NSTextView>,
     range: std::cell::Cell<NSRange>,
     fingerprint: std::cell::Cell<u64>,
     original_display: RefCell<String>,
+    markdown: RefCell<String>,
+    editing_markdown: std::cell::Cell<bool>,
     committing: std::cell::Cell<bool>,
     needs_layout: std::cell::Cell<bool>,
 }
@@ -2194,7 +2254,8 @@ unsafe fn commit_table_cell(cell: &TableCell) {
         }
     }
     let value = cell.stringValue().to_string();
-    if value == *cell.ivars().original_display.borrow() {
+    let editing = cell.ivars().editing_markdown.get();
+    if (editing && value == *cell.ivars().markdown.borrow()) || (!editing && value == *cell.ivars().original_display.borrow()) {
         return;
     }
     let source = text.string().to_string();
@@ -2204,7 +2265,7 @@ unsafe fn commit_table_cell(cell: &TableCell) {
     let range = cell.ivars().range.get();
     let begin = byte_for_utf16(&source, range.location);
     let end = byte_for_utf16(&source, range.location + range.length);
-    let replacement = table_cell_replacement(&source[begin..end], &value);
+    let replacement = if editing { grid_encode_source(&value) } else { table_cell_replacement(&source[begin..end], &value) };
     let length = replacement.encode_utf16().count();
     let delta = length as isize - range.length as isize;
     let siblings = table_cells(&text);
@@ -2264,6 +2325,7 @@ unsafe fn commit_table_cell(cell: &TableCell) {
     let start = remap(selection.location);
     let end = remap(selection.location + selection.length);
     text.setSelectedRange(NSRange::new(start, end.saturating_sub(start)));
+    *cell.ivars().markdown.borrow_mut() = grid_editable_source(&replacement);
     *cell.ivars().original_display.borrow_mut() = value;
     cell.ivars().needs_layout.set(true);
     cell.ivars().committing.set(false);
@@ -2276,13 +2338,64 @@ define_class!(
     struct TableCell;
     unsafe impl NSObjectProtocol for TableCell {}
     unsafe impl NSControlTextEditingDelegate for TableCell {
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        unsafe fn command(&self, _: &NSControl, editor: &NSTextView, command: objc2::runtime::Sel) -> bool {
+            let marked:bool = msg_send![editor,hasMarkedText];
+            if !marked && command == sel!(deleteBackward:) && inline_backspace(editor,grid_inline_syntax) {
+                true
+            } else if !marked && (command == sel!(moveLeft:) || command == sel!(moveRight:)) {
+                let left = command == sel!(moveLeft:);
+                if left { editor.moveLeft(None); } else { editor.moveRight(None); }
+                skip_inline_marker(editor,left,grid_inline_syntax);
+                true
+            } else if command == sel!(insertNewline:) && !marked {
+                editor.insertNewlineIgnoringFieldEditor(None);
+                true
+            } else { false }
+        }
+        #[unsafe(method(controlTextDidChange:))]
+        fn grid_text_changed(&self, _: &objc2_foundation::NSNotification) {unsafe {
+            if let Some(editor) = self.currentEditor().and_then(|e|e.downcast::<NSTextView>().ok()) {
+                restyle_grid_editor(self,&editor);
+            }
+        }}
         #[unsafe(method(controlTextDidEndEditing:))]
         fn did_end_editing(&self, _notification: &objc2_foundation::NSNotification) {
-            unsafe { commit_table_cell(self); }
+            unsafe {
+                commit_table_cell(self);
+                if self.ivars().editing_markdown.replace(false) {
+                    if let (Some(view),Some(text)) = (self.grid(),self.ivars().text.load()) {
+                        let source = text.string().to_string();
+                        if let Some(table) = table_previews(&source).into_iter().find(|t| utf16_range(&source,t.bytes.clone()) == view.ivars().range.get()) {
+                            render_grid_cell(self,&table);
+                        }
+                    }
+                }
+            }
         }
     }
     unsafe impl NSTextFieldDelegate for TableCell {}
     impl TableCell {
+        #[unsafe(method(drawRect:))]
+        fn draw_cell(&self, dirty:NSRect) {unsafe {
+            if let Some(background) = self.backgroundColor() {
+                background.setFill();
+                NSBezierPath::bezierPathWithRect(self.bounds()).fill();
+            }
+            let _:() = msg_send![super(self),drawRect:dirty];
+        }}
+        #[unsafe(method(mouseDown:))]
+        fn grid_down(&self, event: &NSEvent) { unsafe {
+            if event.clickCount() >= 2 && self.isEditable() {
+                self.selectText(None);
+            } else if self.ivars().text.load().is_some_and(|t| t.isEditable()) {
+                track_grid_selection(self);
+            } else { let _: () = msg_send![super(self), mouseDown:event]; }
+        }}
+        #[unsafe(method(rightMouseDown:))]
+        fn context(&self, event: &NSEvent) { unsafe { grid_menu(self,event); }}
+        #[unsafe(method(gridAlign:))]
+        fn align_cells(&self,item:&NSMenuItem) {unsafe { apply_grid_alignment(self,item.tag()); }}
         #[unsafe(method(commitCell:))]
         fn commit_cell(&self, _sender: Option<&AnyObject>) {
             unsafe { commit_table_cell(self); }
@@ -2291,6 +2404,7 @@ define_class!(
 );
 
 include!("table_controls.rs");
+include!("table_grid.rs");
 
 const TABLE_COLUMN_WIDTH: f64 = 140.0;
 
@@ -2306,6 +2420,12 @@ define_class!(
     #[ivars = InlineTableState]
     struct InlineTable;
     impl InlineTable {
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts(&self) -> bool { true }
+        #[unsafe(method(keyDown:))]
+        fn grid_key(&self,event:&NSEvent) { unsafe {
+            if !move_grid_selection(self,event.keyCode()) { let _: () = msg_send![super(self),keyDown:event]; }
+        }}
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self,_event:Option<&NSEvent>) {unsafe {
             // Restyling removes this preview from its superview. Keep the
@@ -2323,20 +2443,52 @@ define_class!(
 );
 #[derive(Debug)]
 struct InlineTableSpec {
+    styles: std::collections::HashMap<(usize,usize),Vec<Span>>,
+    layout: serde_json::Value, marker: Option<Range<usize>>,
+    alignments: Vec<pulldown_cmark::Alignment>,
     bytes: Range<usize>,
     rows: Vec<Vec<String>>,
     cell_ranges: Vec<Vec<Range<usize>>>,
 }
 impl InlineTableSpec {
     fn height(&self) -> f64 {
-        self.rows.len() as f64 * 30.0
+        (0..self.rows.len()).map(|r| self.row_height(r)).sum()
     }
     fn anchor(&self, source: &str) -> NSRange {
         let content = source[self.bytes.clone()].trim_end_matches(['\r', '\n']);
         let start = self.bytes.start + content.rfind('\n').map(|n| n + 1).unwrap_or(0);
         utf16_range(source, start..self.bytes.start + content.len())
     }
+
+    fn separator_line(&self, source: &str) -> Option<Range<usize>> {
+        let start = self.bytes.end;
+        let line = source[start..].split_inclusive('\n').next()?;
+        (source[..start].ends_with('\n')
+            && line.ends_with('\n')
+            && line.trim_matches([' ', '\t', '\r', '\n']).is_empty())
+        .then_some(start..start + line.len())
+    }
 }
+const TABLE_TOP_PADDING: f64 = 6.0;
+const TABLE_HANDLE_SIZE: f64 = 22.0;
+
+unsafe fn style_table_anchor(
+    storage: &NSTextStorage,
+    source: &str,
+    table: &InlineTableSpec,
+    handle_room: f64,
+    caret_inset: f64,
+) {
+    let paragraph = NSMutableParagraphStyle::new();
+    paragraph.setMinimumLineHeight(0.01);
+    paragraph.setMaximumLineHeight(0.01);
+    let bottom_padding = if handle_room > 0.0 { 2.0 } else { 6.0 };
+    paragraph.setParagraphSpacing(
+        table.height() + TABLE_TOP_PADDING + (handle_room + bottom_padding - caret_inset).max(0.0),
+    );
+    storage.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, table.anchor(source));
+}
+
 fn table_previews(source: &str) -> Vec<InlineTableSpec> {
     let mut tables = Vec::new();
     let mut table: Option<InlineTableSpec> = None;
@@ -2344,10 +2496,13 @@ fn table_previews(source: &str) -> Vec<InlineTableSpec> {
     let mut row_ranges = Vec::new();
     let mut cell_range = 0..0;
     let mut cell = String::new();
-    for (event, bytes) in Parser::new_ext(source, Options::ENABLE_TABLES).into_offset_iter() {
+    let mut open_styles = Vec::new();
+    let mut runs = Vec::new();
+    for (event, bytes) in Parser::new_ext(source, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH).into_offset_iter() {
         match event {
-            Event::Start(Tag::Table(_)) => {
+            Event::Start(Tag::Table(alignments)) => {
                 table = Some(InlineTableSpec {
+                    styles:Default::default(), alignments, layout: serde_json::json!({}), marker: None,
                     bytes,
                     rows: Vec::new(),
                     cell_ranges: Vec::new(),
@@ -2358,15 +2513,47 @@ fn table_previews(source: &str) -> Vec<InlineTableSpec> {
                 row_ranges.clear();
             }
             Event::Start(Tag::TableCell) => {
-                cell.clear();
+                cell.clear(); open_styles.clear(); runs.clear();
                 let raw = &source[bytes.clone()];
                 let leading = raw.len() - raw.trim_start_matches([' ', '\t']).len();
                 let trimmed = raw.trim_matches([' ', '\t']);
                 cell_range = bytes.start + leading..bytes.start + leading + trimmed.len();
             }
-            Event::Text(value) | Event::Code(value) if table.is_some() => cell.push_str(&value),
+            Event::Start(tag @ (Tag::Strong | Tag::Emphasis | Tag::Strikethrough)) if table.is_some() => {
+                let kind = match tag { Tag::Strong => Treatment::Bold, Tag::Emphasis => Treatment::Italic, _ => Treatment::Strike };
+                open_styles.push((kind,cell.len()));
+            }
+            Event::End(tag @ (TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough)) if table.is_some() => {
+                let kind = match tag { TagEnd::Strong => Treatment::Bold, TagEnd::Emphasis => Treatment::Italic, _ => Treatment::Strike };
+                finish_grid_run(&mut open_styles,&mut runs,kind,cell.len());
+            }
+            Event::InlineHtml(value) if table.is_some() => {
+                if let Some((kind,closing)) = grid_html_style(&value) {
+                    if closing { finish_grid_run(&mut open_styles,&mut runs,kind,cell.len()); }
+                    else { open_styles.push((kind,cell.len())); }
+                    continue;
+                }
+                if matches!(value.to_ascii_lowercase().as_str(), "<br>"|"<br/>"|"<br />") { cell.push('\n'); }
+                else if let Some(t) = table.as_mut() {
+                    if t.rows.is_empty() && row.is_empty() && bytes.start == cell_range.start {
+                        if let Some(json) = value.strip_prefix("<!--stology-grid ").and_then(|s| s.strip_suffix("-->")) {
+                            if let Ok(v @ serde_json::Value::Object(_)) = serde_json::from_str(json) {
+                                t.layout = v; cell_range.start = bytes.end; t.marker = Some(bytes);
+                            }
+                        }
+                    }
+                }
+            }
+            Event::Text(value) if table.is_some() => cell.push_str(&value),
+            Event::Code(value) if table.is_some() => {
+                let start = cell.len(); cell.push_str(&value);
+                runs.push(Span{bytes:start..cell.len(), treatment:Treatment::Code});
+            }
             Event::SoftBreak | Event::HardBreak if table.is_some() => cell.push(' '),
             Event::End(TagEnd::TableCell) => {
+                if let Some(t) = &mut table {
+                    if !runs.is_empty() { t.styles.insert((t.rows.len(),row.len()), std::mem::take(&mut runs)); }
+                }
                 row.push(cell.clone());
                 row_ranges.push(cell_range.clone());
             }
@@ -2810,6 +2997,16 @@ mod tests {
                 .encode_utf16()
                 .count()
         );
+    }
+    #[test]
+    fn table_preview_collapses_only_the_first_blank_line_after_the_table() {
+        for separator in ["\n", "  \r\n", "\t\n"] {
+            let source = format!("| 열 | 값 |\n|---|---|\n| 한글 | 😀 |\n{separator}\n본문");
+            let table = table_previews(&source).remove(0);
+            assert_eq!(&source[table.separator_line(&source).unwrap()], separator);
+        }
+        let source = "| 열 | 값 |\n|---|---|\n| 한글 | 😀 |\n";
+        assert_eq!(table_previews(source)[0].separator_line(source), None);
     }
     #[test]
     fn markdown_coverage_and_byte_boundaries() {

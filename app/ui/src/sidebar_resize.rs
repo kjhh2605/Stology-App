@@ -151,7 +151,6 @@ impl Divider {
         let allocated = Self::alloc(mtm()).set_ivars(DividerState {side, ..Default::default()});
         let divider: Retained<Self> = msg_send![super(allocated),
             initWithFrame:rect(0., 0., sidebar_layout::RESIZE_WIDTH, 100.)];
-        divider.setToolTip(Some(&NSString::from_str(if side == 0 {"드래그하여 왼쪽 사이드바 너비 조절"} else {"드래그하여 오른쪽 사이드바 너비 조절"})));
         let _: () = msg_send![&divider, setAccessibilityElement:true];
         let _: () = msg_send![&divider, setAccessibilityRole:&*NSString::from_str("AXSplitter")];
         let _: () = msg_send![&divider, setAccessibilityLabel:&*NSString::from_str(if side == 0 {"왼쪽 사이드바 너비 조절"} else {"오른쪽 사이드바 너비 조절"})];

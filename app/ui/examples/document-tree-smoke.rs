@@ -185,12 +185,7 @@ fn main() {
                         <= badge.frame().origin.x - 4. + 0.5,
                     "{ext} title overlaps badge"
                 );
-                if label.intrinsicContentSize().width > label.frame().size.width {
-                    let document = tree["entries"].as_array().unwrap().iter().find(|d| d["id"] == id).unwrap();
-                    assert_eq!(cell.toolTip().unwrap().to_string(), document["title"].as_str().unwrap());
-                } else {
-                    assert!(cell.toolTip().is_none(), "unclipped title needs no tooltip");
-                }
+                assert!(cell.toolTip().is_none(), "document title has no native tooltip");
             }
         }
         let menu = NSMenu::new(mtm());
@@ -574,10 +569,7 @@ fn main() {
             Some("existing name"),
             Some("같은 이름의 파일이 있습니다"),
         );
-        assert_eq!(
-            field.toolTip().unwrap().to_string(),
-            "같은 이름의 파일이 있습니다"
-        );
+        assert!(field.toolTip().is_none());
         let editor: Retained<NSTextView> = Retained::cast_unchecked(field.currentEditor().unwrap());
         assert_eq!(editor.string().to_string(), "existing name");
         editor.setString(&NSString::from_str("discard this"));

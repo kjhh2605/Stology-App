@@ -334,7 +334,6 @@ unsafe fn send_button_state(button: &NSButton, stopping: bool) {
         button.setImage(image.imageWithSymbolConfiguration(&configuration).as_deref());
     }
     let label = NSString::from_str(if stopping {"응답 중지"}else{"질문 전송"});
-    button.setToolTip(None);
     let _: () = msg_send![button,setAccessibilityLabel:&*label];
 }
 unsafe fn area(input: bool) -> (Retained<NSScrollView>, Retained<NSTextView>) {
@@ -477,7 +476,6 @@ impl Panel {
         theme::chat_pill_button(&history, "list");
         history.setImagePosition(NSCellImagePosition::ImageOnly);
         history.setAccessibilityLabel(Some(&NSString::from_str("대화 목록")));
-        history.setToolTip(Some(&NSString::from_str("대화 목록 열기")));
         let history_viewport: Retained<HistoryViewport> =
             msg_send![HistoryViewport::alloc(mtm()), initWithFrame:rect(12., 0., 316., 0.)];
         let history_viewport = Retained::into_super(history_viewport);
@@ -648,7 +646,6 @@ impl Panel {
             if let Some(row) = self.model.itemAtIndex(index as isize) {
                 model_menu_title(&row, &title, item["available"] == true);
                 let state = if item["available"] == true { "사용 가능 · 연결 및 모델 목록 확인됨" } else { "사용 불가 또는 확인 필요 · 왼쪽 구독 계정 연결에서 확인" };
-                row.setToolTip(Some(&NSString::from_str(&format!("{title} · {state}"))));
                 let _: () = msg_send![&row,setAccessibilityLabel:&*NSString::from_str(&format!("{title} · {state}"))];
             }
         }
@@ -666,7 +663,6 @@ impl Panel {
         *self.model_title.borrow_mut() = title.clone();
         self.model_display.setTitle(&NSString::from_str(&title));
         cell.setMenuItem(Some(&self.model_display));
-        self.model.setToolTip(Some(&NSString::from_str(&title)));
         theme::chat_status_dot_state(&self.model_dot, index.is_some_and(|i| self.model_items[i]["available"] == true));
         self.layout_controls();
     }
@@ -719,7 +715,6 @@ impl Panel {
             self.effort.addItemWithTitle(&NSString::from_str(&title));
         }
         self.effort.selectItemAtIndex(self.effort_items.iter().position(|e|*e==selected).unwrap_or(0) as isize);
-        self.effort.setToolTip(Some(&NSString::from_str(if self.effort_items.len()<=1 {"선택한 모델은 effort 설정을 제공하지 않습니다"} else {"추론 강도 · 모델별로 기억하며 다음 질문에 적용합니다"})));
         self.layout_controls();
     }
     unsafe fn refresh_models(&mut self) {
@@ -1195,7 +1190,6 @@ impl Panel {
     unsafe fn close_history(&mut self, animate: bool) {
         let animate = animate && !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
         self.history_open = false;
-        self.history.setToolTip(Some(&NSString::from_str("대화 목록 열기")));
         self.set_history_frame(animate);
         // A clipped NSView still exposes its rows to accessibility.
         self.history_close_at = animate.then(|| Instant::now() + Duration::from_secs_f64(HISTORY_SLIDE_SECONDS));
@@ -1218,7 +1212,6 @@ impl Panel {
             self.history_open = true;
             self.history_close_at = None;
             self.history_viewport.setHidden(false);
-            self.history.setToolTip(Some(&NSString::from_str("대화 목록 닫기")));
         }
         if !self.history_open || (!opening && self.searched.as_ref() == Some(&term)) {
             return;
@@ -1280,7 +1273,6 @@ impl Panel {
             hit.setFrame(card.bounds());
             hit.setTag(-1-index as isize);
             hit.setAccessibilityLabel(Some(&NSString::from_str(&format!("{title} · {meta}"))));
-            hit.setToolTip(Some(&NSString::from_str(&format!("{title}\n{}",strv(row,"snippet")))));
             card.addSubview(&hit);
             body.addSubview(&card);
         }
@@ -1340,7 +1332,6 @@ impl Panel {
         self.history_open = true;
         self.history_close_at = None;
         self.history_viewport.setHidden(false);
-        self.history.setToolTip(Some(&NSString::from_str("대화 목록 닫기")));
         self.refresh_history(false);
         if let Some(document) = self.list.documentView() {
             document.scrollPoint(NSPoint::new(0., scrolled));

@@ -363,15 +363,9 @@ impl Messages {
                                 match distill { "queued" => "정리 중…", "done" => "정리됨 ✓", _ => "노트로 정리" },
                                 if distill == "kept" { "저장됨 ✓" } else { "그대로 저장" },
                             ];
-                            let tips = [
-                                "대화가 끝난 뒤 정리할 답으로 표시해요. 다시 누르면 표시를 지워요.",
-                                "이 답을 지금 노트 초안으로 정리해요. 대화 내용이 AI에 한 번 더 전송돼요.",
-                                "질문과 답을 그대로 노트로 저장해요. AI를 부르지 않아요.",
-                            ];
                             for (n, button) in notes.iter().enumerate() {
                                 button.setTitle(&NSString::from_str(titles[n]));
                                 footer_title(button);
-                                button.setToolTip(Some(&NSString::from_str(tips[n])));
                                 button.setHidden(!done);
                             }
                             // 정리하는 중이거나 이미 노트가 된 답은 다시 누를 수 없다.

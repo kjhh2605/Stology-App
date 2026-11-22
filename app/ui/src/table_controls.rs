@@ -163,11 +163,6 @@ unsafe fn add_table_handle(view: &InlineTable, columns: bool, frame: NSRect) {
     handle.setBordered(false);
     let label = if columns { "열 조절" } else { "행 조절" };
     let _: () = msg_send![&handle, setAccessibilityLabel: &*NSString::from_str(label)];
-    handle.setToolTip(Some(&NSString::from_str(if columns {
-        "열 조절 · 클릭해서 추가하거나 좌우로 드래그"
-    } else {
-        "행 조절 · 클릭해서 추가하거나 위아래로 드래그"
-    })));
     handle.setWantsLayer(true);
     if let Some(wash) = wash {
         let layer: Retained<AnyObject> = msg_send![&handle, layer];
@@ -183,15 +178,16 @@ unsafe fn add_table_handle(view: &InlineTable, columns: bool, frame: NSRect) {
     view.addSubview(&handle);
 }
 
-#[derive(Clone, Copy)]
 struct TableSizePreview {
+    layout: Option<serde_json::Value>,
     start: usize,
     rows: usize,
     columns: usize,
 }
 
 impl TableSizePreview {
-    fn apply(self, table: &mut InlineTableSpec) {
+    fn apply(&self, table: &mut InlineTableSpec) {
+        if let Some(layout) = &self.layout { table.layout.clone_from(layout); }
         // Preview cells are transient. Their source slots become real only on commit.
         table.rows.resize_with(self.rows, Vec::new);
         table.cell_ranges.resize_with(self.rows, Vec::new);
@@ -200,48 +196,6 @@ impl TableSizePreview {
             ranges.resize(self.columns, self.start..self.start);
         }
     }
-}
-
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGWarpMouseCursorPosition(point: NSPoint) -> i32;
-}
-
-/// Resolve the rebuilt handle, retaining the original grab point within it.
-unsafe fn table_drag_anchor(text: &NSTextView, at: usize, columns: bool, grab: NSPoint) -> Option<NSPoint> {
-    for view in text.subviews() {
-        if !view.isKindOfClass(InlineTable::class()) { continue; }
-        let table = &*Retained::as_ptr(&view).cast::<InlineTable>();
-        if table.ivars().range.get().location != at { continue; }
-        for child in table.subviews() {
-            if !child.isKindOfClass(TableHandle::class()) { continue; }
-            let handle = &*Retained::as_ptr(&child).cast::<TableHandle>();
-            if handle.ivars().columns != columns { continue; }
-            let rect = handle.visibleRect();
-            if rect.size.width < 2.0 || rect.size.height < 2.0 { return None; }
-            let point = NSPoint::new(
-                grab.x.clamp(rect.origin.x + 1.0, rect.origin.x + rect.size.width - 1.0),
-                grab.y.clamp(rect.origin.y + 1.0, rect.origin.y + rect.size.height - 1.0));
-            return Some(handle.convertPoint_toView(point, None));
-        }
-    }
-    None
-}
-
-unsafe fn follow_table_handle(text: &NSTextView, window: &NSWindow, at: usize, columns: bool, grab: NSPoint) {
-    // Never move the desktop pointer for background windows or synthetic smoke tests.
-    if !window.isKeyWindow() || !NSApplication::sharedApplication(text.mtm()).isActive() { return; }
-    let Some(point) = table_drag_anchor(text, at, columns, grab) else { return; };
-    let point = window.convertPointToScreen(point);
-    let screens = NSScreen::screens(text.mtm());
-    let Some(primary) = screens.firstObject() else { return; };
-    // AppKit screen coordinates have a bottom-left origin; Quartz uses top-left.
-    let top = primary.frame().origin.y + primary.frame().size.height;
-    let _ = CGWarpMouseCursorPosition(NSPoint::new(point.x, top - point.y));
-}
-
-fn table_drag_count(initial: usize, distance: f64, step: f64, limit: usize) -> usize {
-    initial.saturating_add_signed((distance / step).round() as isize).clamp(1, limit)
 }
 
 unsafe fn track_table_size(handle: &TableHandle, event: &NSEvent) {
@@ -282,38 +236,28 @@ unsafe fn track_table_size(handle: &TableHandle, event: &NSEvent) {
     // 한 칸만큼 끌면 한 칸이 늘도록, 열은 현재 열 너비를 행은 행 높이를 단위로 쓴다.
     let step = if columns { (handle.frame().origin.x / initial as f64).max(30.0) } else { 30.0 };
     let origin = event.locationInWindow();
-    let grab = handle.convertPoint_fromView(origin, None);
-    let mut distance = 0.0;
-    let mut previous_event_point = origin;
-    let follows_pointer = window.isKeyWindow() && NSApplication::sharedApplication(text.mtm()).isActive();
     let mask = NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp;
     let mut dragged = false;
     let mut displayed = initial;
     let base = table.ivars().base_directory.as_deref();
     while let Some(next) = window.nextEventMatchingMask(mask) {
         let point = next.locationInWindow();
-        if follows_pointer {
-            // Physical deltas remain independent of cursor warps and table snapping.
-            // A mouse-up has no new movement; do not count the snap as a drag.
-            if next.r#type() == NSEventType::LeftMouseDragged {
-                let movement = if next.deltaX() == 0.0 && next.deltaY() == 0.0 {
-                    // Accessibility-generated drags can carry absolute positions only.
-                    if columns { point.x - previous_event_point.x } else { previous_event_point.y - point.y }
-                } else if columns { next.deltaX() } else { next.deltaY() };
-                distance += movement;
-                dragged |= distance.abs() >= 4.0;
-                previous_event_point = point;
-                distance = distance.clamp(-((initial - 1) as f64) * step, (limit as f64 - initial as f64) * step);
-            }
+        let distance = if columns {
+            point.x - origin.x
         } else {
-            distance = if columns { point.x - origin.x } else { origin.y - point.y };
-        }
+            origin.y - point.y
+        };
         dragged |= distance.abs() >= 4.0;
-        let count = if dragged { table_drag_count(initial, distance, step, limit) }
-            else { (initial + 1).min(limit) };
+        let delta = if dragged {
+            (distance / step).round() as isize
+        } else {
+            1
+        };
+        let count = initial.saturating_add_signed(delta).clamp(1, limit);
         if next.r#type() != NSEventType::LeftMouseUp {
             if dragged && count != displayed {
                 let size = TableSizePreview {
+                    layout: None,
                     start: spec.bytes.start,
                     rows: if columns { spec.rows.len() } else { count },
                     columns: if columns { count } else { spec.rows[0].len() },
@@ -327,7 +271,6 @@ unsafe fn track_table_size(handle: &TableHandle, event: &NSEvent) {
                 }
                 displayed = count;
             }
-            if dragged { follow_table_handle(&text, &window, range.location, columns, grab); }
             continue;
         }
         if initial == count || text.string().to_string() != source {
@@ -348,13 +291,11 @@ unsafe fn track_table_size(handle: &TableHandle, event: &NSEvent) {
         };
         text.setSelectedRange(NSRange::new(offset, 0));
         style_with_base(&text, base);
-        if dragged { follow_table_handle(&text, &window, range.location, columns, grab); }
         return;
     }
     if displayed != initial {
         style_with_base(&text, base);
     }
-    if dragged { follow_table_handle(&text, &window, range.location, columns, grab); }
 }
 
 fn resize_table_source(
@@ -422,15 +363,4 @@ fn resize_preserves_markdown_and_edits_empty_grid() {
         resize_table_source(&one_row, &table_previews(&one_row)[0], false, 2).unwrap(),
         empty
     );
-}
-
-#[cfg(test)]
-#[test]
-fn table_drag_counts_preserve_subcell_motion_and_reverse_at_limits() {
-    assert_eq!(table_drag_count(3, 60.0, 140.0, 16), 3);
-    assert_eq!(table_drag_count(3, 75.0, 140.0, 16), 4);
-    assert_eq!(table_drag_count(3, -75.0, 140.0, 16), 2);
-    assert_eq!(table_drag_count(2, 45.0, 30.0, 100), 4);
-    assert_eq!(table_drag_count(3, -1000.0, 140.0, 16), 1);
-    assert_eq!(table_drag_count(3, 10000.0, 140.0, 16), 16);
 }

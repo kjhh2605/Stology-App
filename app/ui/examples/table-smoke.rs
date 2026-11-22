@@ -109,6 +109,72 @@ unsafe fn check_drag(text: &Retained<NSTextView>, window: &NSWindow, columns: bo
     text.setSelectedRange(NSRange::new(0, 0));
     editor::style(text);
 }
+unsafe fn check_grid_divider(text: &NSTextView, window: &NSWindow, columns: bool) {
+    let original = text.string().to_string();
+    let controls = cells(text);
+    let table = controls[0].superview().unwrap();
+    let divider = table.subviews().into_iter().find(|view| {
+        view.isKindOfClass(class!(StologyGridDivider)) && (view.frame().size.width < view.frame().size.height) == columns
+    }).unwrap();
+    let boundary = controls[0].frame();
+    for offset in [-4., 4.] {
+        let point = if columns { NSPoint::new(boundary.size.width + 1. + offset, 10.) }
+                    else { NSPoint::new(10., boundary.size.height + 1. + offset) };
+        let hit = table.hitTest(table.convertPoint_toView(point, table.superview().as_deref())).unwrap();
+        assert!(hit.isEqual(Some(&*divider)), "divider missed a point 4pt from its center");
+    }
+    let event = |kind, delta| {
+        let point = if columns { NSPoint::new(100. + delta, 100.) } else { NSPoint::new(100., 100. - delta) };
+        NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            kind, point, NSEventModifierFlags::empty(), 0., window.windowNumber(), None, 1, 1, 1.).unwrap()
+    };
+    window.postEvent_atStart(&event(NSEventType::LeftMouseUp, 36.), true);
+    window.postEvent_atStart(&event(NSEventType::LeftMouseDragged, 24.), true);
+    let _: () = msg_send![&*divider,mouseDown:&*event(NSEventType::LeftMouseDown,0.)];
+    let result = cells(text);
+    assert_eq!(result.len(), 4);
+    for i in 0..4 {
+        let before = controls[i].frame();
+        let after = result[i].frame();
+        if columns {
+            let change = if i % 2 == 0 {36.} else {-36.};
+            assert_eq!(after.size.width, before.size.width + change);
+            assert_eq!(after.origin.y, before.origin.y);
+        } else if i < 2 {
+            assert_eq!(after.size.height, before.size.height + 36.);
+        } else {
+            assert_eq!(after.origin.y, before.origin.y + 36.);
+            assert_eq!(after.size.height, before.size.height);
+        }
+    }
+    let undo: Retained<AnyObject> = msg_send![text, undoManager];
+    let _: () = msg_send![&*undo, undo];
+    assert_eq!(text.string().to_string(), original);
+    text.setSelectedRange(NSRange::new(0,0));
+    editor::style(text);
+}
+unsafe fn check_after_table_caret(text: &NSTextView, window: &NSWindow) {
+    let table = "|  |  |\n| --- | --- |\n|  |  |\n\n";
+    let caret_top = |suffix: &str| {
+        let source = format!("{table}{suffix}");
+        text.setString(&NSString::from_str(&source));
+        let caret = NSRange::new(source.encode_utf16().count(), 0);
+        text.setSelectedRange(caret);
+        window.makeFirstResponder(Some(text));
+        editor::style(text);
+        let rect: NSRect = msg_send![text, firstRectForCharacterRange:caret actualRange:std::ptr::null_mut::<NSRange>()];
+        assert!(rect.size.height > 0.0);
+        assert_eq!(text.string().to_string(), source);
+        assert_eq!(cells(text).len(), 4);
+        rect.origin.y + rect.size.height
+    };
+    let empty = caret_top("");
+    let typed = caret_top("본문");
+    let extra_blank = caret_top("\n본문");
+    assert!((empty - typed).abs() < 1.0, "typing after the table shifted the caret vertically");
+    assert!((typed - extra_blank - 24.0).abs() < 1.0, "an extra blank line should remain visible");
+}
+
 fn main() {
     unsafe {
         let mtm = MainThreadMarker::new().unwrap();
@@ -118,6 +184,7 @@ fn main() {
         let allocated = SmokeWindow::alloc(mtm);
         let window: Retained<SmokeWindow> = msg_send![allocated, initWithContentRect:frame styleMask:NSWindowStyleMask::Titled backing:NSBackingStoreType::Buffered defer:false];
         window.setContentView(Some(&scroll));
+        check_after_table_caret(&text, &window);
         let original = "# Table\n\n| **열** | 값 |\n|:---|---:|\n| 한글 | 😀 |\n\n끝";
         text.setString(&NSString::from_str(original));
         text.setSelectedRange(NSRange::new(0, 0));
@@ -125,6 +192,8 @@ fn main() {
         editor::style(&text);
         check_drag(&text, &window, true);
         check_drag(&text, &window, false);
+        check_grid_divider(&text,&window,true);
+        check_grid_divider(&text,&window,false);
         let controls = cells(&text);
         assert_eq!(controls.len(), 4);
         assert!(controls.iter().all(|cell| cell.isEditable()));
@@ -165,6 +234,8 @@ fn main() {
         let field = controls[2]
             .currentEditor()
             .expect("native cell field editor");
+        let delegate: Retained<AnyObject> = msg_send![&*field, delegate];
+        assert!(Retained::as_ptr(&delegate) == Retained::as_ptr(&controls[2]).cast(), "context-click filter must recognize the active cell");
         let _: () = msg_send![&*field, setSelectedRange:NSRange::new(2, 0)];
         let _: () = msg_send![&*field, selectAll:std::ptr::null::<AnyObject>()];
         let selected: NSRange = msg_send![&*field, selectedRange];

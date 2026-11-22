@@ -52,7 +52,6 @@ struct RenameSession {
     field: Retained<NSTextField>,
     original: String,
     ink: Option<Retained<NSColor>>,
-    tooltip: Option<Retained<NSString>>,
 }
 impl Node {
     fn folder(&self) -> bool {
@@ -137,10 +136,6 @@ define_class!(
             let title_width = (width - 28. - right).max(0.);
             if let Some(label) = self.textField() {
                 label.setFrame(rect(28., 9., title_width, 20.));
-                let tooltip = if label.intrinsicContentSize().width > title_width && !label.isEditable() {
-                    Some(self.ivars().title.clone())
-                } else { None };
-                self.setToolTip(tooltip.as_deref());
             }
             if let Some(badge) = &self.ivars().badge {
                 badge.setFrame(rect((width - badge_width - 6.).max(0.), 10., badge_width, theme::FILE_TYPE_BADGE_HEIGHT));
@@ -561,7 +556,6 @@ impl DocumentTree {
         rename.field.setDrawsBackground(false);
         rename.field.setFocusRingType(NSFocusRingType::None);
         rename.field.setTextColor(rename.ink.as_deref());
-        rename.field.setToolTip(rename.tooltip.as_deref());
         rename.field.setStringValue(&NSString::from_str(if commit {
             &value
         } else {
@@ -617,7 +611,6 @@ impl DocumentTree {
                         field: field.clone(),
                         original: original.clone(),
                         ink: field.textColor(),
-                        tooltip: field.toolTip(),
                     };
                     field.setStringValue(&NSString::from_str(attempted.unwrap_or(&original)));
                     field.setEditable(true);
@@ -626,9 +619,6 @@ impl DocumentTree {
                     field.setDrawsBackground(true);
                     field.setBackgroundColor(Some(&NSColor::controlBackgroundColor()));
                     field.setFocusRingType(NSFocusRingType::Exterior);
-                    field.setToolTip(Some(&NSString::from_str(
-                        error.unwrap_or("Enter로 저장 · Esc로 취소"),
-                    )));
                     if error.is_some() {
                         field.setTextColor(Some(&NSColor::systemRedColor()));
                     }
@@ -700,15 +690,6 @@ impl DocumentTree {
                 analyze.setTarget(Some(self));
                 analyze.setImage(theme::icon("sparkle", 13.).as_deref());
                 analyze.setEnabled(analysis_enabled(&d, self.ivars().analysis_busy.get()));
-                analyze.setToolTip(Some(&NSString::from_str(
-                    if self.ivars().analysis_busy.get() {
-                        "현재 분석이 끝나면 다시 요청할 수 있습니다"
-                    } else if d["analysis_state"] == "analysed" {
-                        "현재 파일의 분석이 완료되었습니다"
-                    } else {
-                        "이 파일을 분석해 지식지도에 반영합니다"
-                    },
-                )));
                 menu.addItem(&analyze);
                 let reread = NSMenuItem::initWithTitle_action_keyEquivalent(
                     NSMenuItem::alloc(mtm()),
@@ -719,9 +700,6 @@ impl DocumentTree {
                 reread.setTarget(Some(self));
                 reread.setImage(theme::icon("review-document", 13.).as_deref());
                 reread.setEnabled(reread_enabled(&d, self.ivars().analysis_busy.get()));
-                reread.setToolTip(Some(&NSString::from_str(
-                    "이 자료만 가장 정밀한 등급으로 다시 읽고 과목 지도에 반영합니다",
-                )));
                 menu.addItem(&reread);
             }
             if d["kind"] == "pptx" {
@@ -734,9 +712,6 @@ impl DocumentTree {
                 annotate.setTarget(Some(self));
                 annotate.setImage(theme::icon("markup", 13.).as_deref());
                 annotate.setEnabled(d["missing"] != true);
-                annotate.setToolTip(Some(&NSString::from_str(
-                    "같은 폴더의 연결된 PDF를 열거나 새 PDF를 만듭니다",
-                )));
                 menu.addItem(&annotate);
                 let reconvert = NSMenuItem::initWithTitle_action_keyEquivalent(
                     NSMenuItem::alloc(mtm()),
@@ -747,9 +722,6 @@ impl DocumentTree {
                 reconvert.setTarget(Some(self));
                 reconvert.setImage(theme::icon("convert-document", 13.).as_deref());
                 reconvert.setEnabled(d["missing"] != true);
-                reconvert.setToolTip(Some(&NSString::from_str(
-                    "현재 PPTX에서 새 PDF를 만듭니다. 기존 필기 PDF는 유지됩니다",
-                )));
                 menu.addItem(&reconvert);
             }
             let rename = NSMenuItem::initWithTitle_action_keyEquivalent(

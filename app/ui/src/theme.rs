@@ -935,7 +935,6 @@ pub unsafe fn chat_attach_button(button: &NSButton) {
     let l = layer(button);
     let _: () = msg_send![&l, setBackgroundColor: &*color(0.431, 0.420, 0.616, 0.09).CGColor()];
     let _: () = msg_send![&l, setCornerRadius: CHAT_CONTROL_FACE_SIZE / 2.];
-    button.setToolTip(Some(&NSString::from_str("이미지 첨부 · 붙여넣기(⌘V)나 끌어놓기도 돼요")));
     let _: () = msg_send![button, setAccessibilityLabel: &*NSString::from_str("이미지 첨부")];
 }
 
