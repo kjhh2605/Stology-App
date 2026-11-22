@@ -1,13 +1,16 @@
 //! Clipboard attachments and native image controls; all document edits use NSTextView undo.
 use super::*;
-use objc2_foundation::NSData;
+use objc2_foundation::{NSData, NSInsetRect};
 use std::cell::Cell;
 #[path = "../../shared/image_markdown.rs"]
 #[allow(dead_code)]
 pub mod markdown;
 
+type DiagramOpener = fn(&str);
+pub fn set_diagram_opener(open: DiagramOpener) { DIAGRAM_OPEN.with(|v|v.set(Some(open))); }
 type Importer = fn(&[u8], &str) -> Result<(String, PathBuf), String>;
 thread_local! {
+    static DIAGRAM_OPEN: Cell<Option<DiagramOpener>> = const {Cell::new(None)};
     static IMPORTER: Cell<Option<Importer>> = const { Cell::new(None) };
     static IMAGE_CACHE: RefCell<Vec<(PathBuf, u64, Option<std::time::SystemTime>, Retained<NSImage>)>> = const { RefCell::new(Vec::new()) };
     static INTERACTING: Cell<bool> = const { Cell::new(false) };
@@ -286,8 +289,17 @@ pub unsafe fn load_image(path: &Path, metadata: &std::fs::Metadata) -> Option<Re
             return Some(image.clone());
         }
         cache.retain(|(p, _, _, _)| p != path);
-        let image =
-            NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(path.to_str()?))?;
+        let owned = path.parent().and_then(Path::file_name).is_some_and(|name|name==".diagram")
+            && path.file_name().and_then(|n|n.to_str()).is_some_and(markdown::diagram_filename);
+        let image = if owned && metadata.len() <= stology_core::diagram_svg::LIMIT as u64 {
+            std::fs::read_to_string(path).ok()
+                .and_then(|svg| stology_core::diagram_svg::Diagram::read(&svg).ok())
+                .map(|(diagram, title)| {
+                    let image = diagram_paint::image(diagram);
+                    image.setAccessibilityDescription(Some(&NSString::from_str(&title)));
+                    image
+                })
+        } else {None}.or_else(|| NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(path.to_str()?)))?;
         if cache.len() >= 32 {
             cache.remove(0);
         }
@@ -390,28 +402,35 @@ pub unsafe fn paste(text: &NSTextView) -> bool {
     });
     match result {
         Ok((destination, base)) => {
-            let native = &*(text as *const NSTextView as *const MarkdownEditor);
-            *native.ivars().base_directory.borrow_mut() = Some(base.clone());
-            let source = text.string().to_string();
             let range: NSRange = msg_send![text, selectedRange];
-            let start = byte_for_utf16(&source, range.location);
-            let prefix = if start > 0 && !source[..start].ends_with('\n') {
-                "\n\n"
-            } else {
-                ""
-            };
-            let replacement = format!(
-                "{prefix}![이미지](<{destination}> \"stology:width=280;x=0.000;wrap=1\")\n\n"
-            );
-            text.breakUndoCoalescing();
-            let _: () = msg_send![text,insertText:&*NSString::from_str(&replacement),replacementRange:range];
-            text.breakUndoCoalescing();
-            style_with_base(text, Some(&base));
+            insert_attachment(text,range,"이미지",&destination,&base,280.);
         }
         Err(message) => show_error(&message),
     }
     true
 }
+pub(super) fn is_diagram_link(destination: &str) -> bool {
+    destination.trim_start_matches("../").strip_prefix(".diagram/").is_some_and(markdown::diagram_filename)
+}
+
+pub(super) fn attachment_markup(alt: &str, destination: &str, width: f64) -> String {
+    format!("![{alt}](<{destination}> \"stology:width={width:.0};x=0.000;wrap=1\")\n\n")
+}
+
+pub(super) unsafe fn insert_attachment(text:&NSTextView, range:NSRange, alt:&str, destination:&str, base:&Path, width:f64) {
+    if let Some(editor)=text.downcast_ref::<MarkdownEditor>() {
+        *editor.ivars().base_directory.borrow_mut()=Some(base.to_owned());
+    }
+    let source=text.string().to_string();
+    let start=byte_for_utf16(&source,range.location);
+    let prefix=if start>0 && !source[..start].ends_with('\n'){"\n\n"}else{""};
+    let markup = format!("{prefix}{}", attachment_markup(alt, destination, width));
+    text.breakUndoCoalescing();
+    let _:()=msg_send![text,insertText:&*NSString::from_str(&markup),replacementRange:range];
+    text.breakUndoCoalescing();
+    style_with_base(text,Some(base));
+}
+
 unsafe fn show_error(message: &str) {
     let alert = NSAlert::new(MainThreadMarker::new().unwrap());
     alert.setMessageText(&NSString::from_str("이미지를 붙여넣지 못했습니다"));
@@ -419,12 +438,118 @@ unsafe fn show_error(message: &str) {
     alert.runModal();
 }
 
+// A layout pass recreates InlineImage views. Anchor selection to this occurrence
+// in the editor so a refresh or a second link to the same SVG cannot move it.
+pub(super) fn select_image(text: &NSTextView, anchor: Option<usize>) {
+    let Some(editor) = text.downcast_ref::<MarkdownEditor>() else { return };
+    if editor.ivars().selected_image.replace(anchor) != anchor {
+        for child in editor.subviews() {
+            if let Some(image) = child.downcast_ref::<InlineImage>() {
+                image.sync_selection();
+            }
+        }
+    }
+}
+
+pub(super) unsafe fn delete_selected_image(text: &MarkdownEditor) -> bool {
+    let Some(anchor) = text.ivars().selected_image.get() else { return false };
+    let marked: bool = msg_send![text, hasMarkedText];
+    if !text.isEditable() || marked { return false; }
+    for child in text.subviews() {
+        if let Some(image) = child.downcast_ref::<InlineImage>() {
+            if image.ivars().link.bytes.start == anchor {
+                image.replace("");
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// The editable view grows temporarily. Markdown and TextKit always use the
+// content frame, so selecting an attachment never changes its line wrapping.
+const SELECTION_MARGIN:f64=11.;
+fn draw_resize_handles(size: NSSize) {
+    let side = 7.0_f64.min(size.width / 4.).min(size.height / 4.);
+    if side < 1. { return; }
+    let inset = side / 2. + 0.5;
+    let left = inset;
+    let right = size.width - inset;
+    let top = inset;
+    let bottom = size.height - inset;
+    let center_x = size.width / 2.;
+    let center_y = size.height / 2.;
+    let accent = diagram_paint::color("#6556D9");
+    accent.setStroke();
+    let outline = NSBezierPath::bezierPathWithRect(NSRect::new(
+        NSPoint::new(left, top), NSSize::new(right-left, bottom-top)));
+    outline.setLineWidth(1.25);
+    outline.stroke();
+    NSColor::whiteColor().setFill();
+    for (x,y) in [(left,top),(center_x,top),(right,top),(right,center_y),
+                  (right,bottom),(center_x,bottom),(left,bottom),(left,center_y)] {
+        let handle=NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+            NSRect::new(NSPoint::new(x-side/2., y-side/2.),NSSize::new(side,side)),1.5,1.5);
+        handle.fill();
+        handle.setLineWidth(1.25);
+        handle.stroke();
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DropAnchor {
+    byte: usize,
+    top: f64,
+    block: bool,
+}
+
+// Only transfer standalone, app-style image paragraphs. Inline Markdown keeps
+// its source position and can still use a visual offset.
+unsafe fn drop_anchors(text: &NSTextView, link: &markdown::ImageLink) -> Vec<DropAnchor> {
+    let source = text.string().to_string();
+    if !source.is_char_boundary(link.bytes.end) { return Vec::new(); }
+    let suffix = &source[link.bytes.end..];
+    if !(suffix.starts_with("\n\n") || suffix.is_empty()) { return Vec::new(); }
+    let mut blocks = Vec::new();
+    let mut depth = 0;
+    let mut own_block = false;
+    for (event, range) in Parser::new_ext(&source, Options::all()).into_offset_iter() {
+        match event {
+            Event::Start(tag) => {
+                if depth == 0 {
+                    let at = range.start;
+                    let own = at == link.bytes.start && matches!(tag, Tag::Paragraph);
+                    own_block |= own;
+                    if at == 0 || source[..at].ends_with("\n\n") {
+                        blocks.push((at, !matches!(tag, Tag::Paragraph) && !own));
+                    }
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ => (),
+        }
+    }
+    if !own_block { return Vec::new(); }
+    let mut units = 0;
+    let mut previous = 0;
+    blocks.into_iter().filter_map(|(byte, block)| {
+        units += source[previous..byte].encode_utf16().count();
+        previous = byte;
+        let rect = layout_fragment_rect(text, units)?;
+        Some(DropAnchor { byte, top: rect.origin.y + 6., block })
+    }).collect()
+}
+
 pub(super) struct ImageState {
+    pub selected: Cell<bool>,
     pub text: Weak<NSTextView>,
     pub link: markdown::ImageLink,
     pub fingerprint: u64,
     pub base: Option<PathBuf>,
     pub range: NSRange,
+    pub(super) targets: RefCell<Vec<DropAnchor>>,
+    pub(super) preview: RefCell<Option<Retained<NSTextView>>>,
     pub drag: Cell<Option<(NSPoint, NSRect, Option<ResizeHandle>)>>,
 }
 define_class!(
@@ -436,6 +561,28 @@ define_class!(
     impl InlineImage {
         #[unsafe(method(isFlipped))]
         fn flipped(&self) -> bool {true}
+        #[unsafe(method(drawRect:))]
+        fn draw(&self, dirty: NSRect) { unsafe {
+            if self.ivars().selected.get() {
+                if let Some(image) = self.image() {
+                    image.drawInRect_fromRect_operation_fraction_respectFlipped_hints(
+                        NSInsetRect(self.bounds(),SELECTION_MARGIN,SELECTION_MARGIN), NSRect::ZERO,
+                        NSCompositingOperation::SourceOver,1.,true,None);
+                }
+                draw_resize_handles(self.bounds().size);
+            } else {
+                let _: () = msg_send![super(self),drawRect:dirty];
+            }
+        }}
+        #[unsafe(method(viewDidMoveToWindow))]
+        fn moved_to_window(&self) { unsafe {
+            let _: () = msg_send![super(self), viewDidMoveToWindow];
+            if self.window().is_none() && self.ivars().drag.take().is_some() {
+                self.clear_preview();
+                self.show_anchor(None);
+                INTERACTING.with(|v| v.set(false));
+            }
+        }}
         #[unsafe(method(resetCursorRects))]
         fn reset_cursors(&self) {unsafe {
             if self.ivars().text.load().is_some_and(|t|t.isEditable()) {
@@ -450,9 +597,12 @@ define_class!(
         fn down(&self,event:&NSEvent) {unsafe {
             let Some(text)=self.ivars().text.load() else {return;};
             if !text.isEditable() {return;}
+            if event.clickCount()==2 && self.open_diagram(){return;}
+            select_image(&text, Some(self.ivars().link.bytes.start));
             let p=self.convertPoint_fromView(event.locationInWindow(),None);
             let resize=resize_handle(p,self.bounds().size);
-            self.ivars().drag.set(Some((event.locationInWindow(),self.frame(),resize)));
+            if resize.is_none() { *self.ivars().targets.borrow_mut() = drop_anchors(&text, &self.ivars().link); }
+            self.ivars().drag.set(Some((text.convertPoint_fromView(event.locationInWindow(),None),self.content_frame(),resize)));
             INTERACTING.with(|v|v.set(true));
             if let Some(handle)=resize {resize_cursor(handle).set();} else {NSCursor::closedHandCursor().set();}
         }}
@@ -460,17 +610,24 @@ define_class!(
         fn dragged(&self,event:&NSEvent) {unsafe {
             let Some((start,original,resize))=self.ivars().drag.get() else {return;};
             let Some(text)=self.ivars().text.load() else {return;};
-            let delta=event.locationInWindow();
+            if resize.is_none() { text.autoscroll(event); }
+            let delta=text.convertPoint_fromView(event.locationInWindow(),None);
             let max_width=(text.bounds().size.width-2.0*EDITOR_INSET-8.0).max(80.0);
             let mut frame=original;
             if let Some(handle)=resize {
-                // Window coordinates point up; image/text coordinates point down.
                 // The Markdown paragraph stays vertically anchored while its size changes.
-                frame=resized_frame(original,handle,delta.x-start.x,start.y-delta.y,max_width);
+                frame=resized_frame(original,handle,delta.x-start.x,delta.y-start.y,max_width);
             } else {
+                if (delta.x-start.x).hypot(delta.y-start.y) < 3. { self.clear_preview(); self.set_content_frame(original); self.show_anchor(None); return; }
+                frame.origin.y=(original.origin.y+delta.y-start.y).clamp(text.textContainerOrigin().y,text.bounds().size.height.max(text.textContainerOrigin().y));
+                let anchor=self.target(original,frame);
+                self.show_anchor(anchor);
+                if let Some(target)=anchor.filter(|a|a.block) { frame.origin.y=target.top; }
                 frame.origin.x=(original.origin.x+delta.x-start.x).clamp(EDITOR_INSET,EDITOR_INSET+(max_width-frame.size.width).max(0.0));
             }
-            self.setFrame(frame);
+            let changed = self.content_frame() != frame;
+            self.set_content_frame(frame);
+            if resize.is_none() && changed { self.preview_move(&text, original, frame); }
             if let Some(handle)=resize {resize_cursor(handle).set();} else {NSCursor::closedHandCursor().set();}
             let _: ()=msg_send![self,setNeedsDisplay:true];
         }}
@@ -479,9 +636,11 @@ define_class!(
             let _keep=Retained::retain(self as *const Self as *mut Self);
             let drag=self.ivars().drag.replace(None);
             INTERACTING.with(|v|v.set(false));
-            let Some((_,original,_))=drag else {return;};
-            let frame=self.frame();
-            if frame!=original { self.commit_layout(frame.size.width, self.position(), self.ivars().link.wrap); }
+            let Some((_,original,resize))=drag else {return;};
+            let frame=self.content_frame();
+            self.clear_preview();
+            self.show_anchor(None);
+            if frame!=original { self.commit_layout(original, frame, resize.is_none()); }
             else if let Some(text)=self.ivars().text.load() {
                 // Put the caret in the paragraph beside the image, not its concealed syntax.
                 let source=text.string().to_string();
@@ -495,45 +654,151 @@ define_class!(
         fn right_down(&self,event:&NSEvent) {unsafe {
             let _keep=Retained::retain(self as *const Self as *mut Self);
             INTERACTING.with(|v|v.set(true));
-            let _: ()=msg_send![super(self),rightMouseDown:event];
+            if let Some(menu)=self.attachment_menu() {
+                let point=self.convertPoint_fromView(event.locationInWindow(),None);
+                menu.popUpMenuPositioningItem_atLocation_inView(None,point,Some(self));
+            }
             INTERACTING.with(|v|v.set(false));
         }}
         #[unsafe(method(menuForEvent:))]
         fn menu(&self,_event:&NSEvent)->*mut NSMenu {unsafe {
-            if !self.ivars().text.load().is_some_and(|t|t.isEditable()) {return std::ptr::null_mut();}
-            let menu=NSMenu::new(MainThreadMarker::new().unwrap());
-            for (title,action) in [("이미지 삭제",sel!(deleteImage:)),("왼쪽에 배치 · 옆에 필기",sel!(alignLeft:)),("오른쪽에 배치 · 옆에 필기",sel!(alignRight:)),("가운데에 배치 · 옆에 필기",sel!(alignCenter:)),("한 줄 전체 사용",sel!(blockImage:))] {
-                let item=NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(MainThreadMarker::new().unwrap()),&NSString::from_str(title),Some(action),&NSString::from_str(""));
-                item.setTarget(Some(self)); menu.addItem(&item);
-            }
-            Retained::autorelease_return(menu)
+            self.attachment_menu().map_or(std::ptr::null_mut(),Retained::autorelease_return)
         }}
+        #[unsafe(method(editDiagram:))]
+        fn edit_diagram(&self,_sender:Option<&AnyObject>) {self.open_diagram();}
         #[unsafe(method(deleteImage:))]
         fn delete(&self,_sender:Option<&AnyObject>) {unsafe {self.replace("");}}
-        #[unsafe(method(alignLeft:))]
-        fn left(&self,_sender:Option<&AnyObject>) {unsafe {self.commit_layout(self.frame().size.width,0.0,true);}}
-        #[unsafe(method(alignRight:))]
-        fn right(&self,_sender:Option<&AnyObject>) {unsafe {self.commit_layout(self.frame().size.width,1.0,true);}}
-        #[unsafe(method(alignCenter:))]
-        fn center(&self,_sender:Option<&AnyObject>) {unsafe {self.commit_layout(self.frame().size.width,0.5,true);}}
-        #[unsafe(method(blockImage:))]
-        fn block(&self,_sender:Option<&AnyObject>) {unsafe {self.commit_layout(self.frame().size.width,0.0,false);}}
+
     }
 );
 impl InlineImage {
+    fn attachment_menu(&self)->Option<Retained<NSMenu>> {
+        if !self.ivars().text.load().is_some_and(|t|t.isEditable()){return None}
+        let mtm=MainThreadMarker::new().unwrap();
+        let menu=NSMenu::new(mtm);
+        menu.setAllowsContextMenuPlugIns(false);
+        let add=|title:&str,action| unsafe {
+            let item=NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm),&NSString::from_str(title),Some(action),&NSString::new());
+            item.setTarget(Some(self));menu.addItem(&item);
+        };
+        if self.diagram_link().is_some(){add("편집",sel!(editDiagram:));}
+        add("삭제",sel!(deleteImage:));Some(menu)
+    }
+    fn content_frame(&self)->NSRect{
+        if self.ivars().selected.get(){NSInsetRect(self.frame(),SELECTION_MARGIN,SELECTION_MARGIN)}else{self.frame()}
+    }
+    fn set_content_frame(&self,frame:NSRect){
+        self.setFrame(if self.ivars().selected.get(){NSInsetRect(frame,-SELECTION_MARGIN,-SELECTION_MARGIN)}else{frame});
+    }
+    pub(super) fn sync_selection(&self) {
+        let selected=self.ivars().text.load().is_some_and(|text|text.isEditable() &&
+            text.downcast_ref::<MarkdownEditor>().is_some_and(|editor|editor.ivars().selected_image.get()==Some(self.ivars().link.bytes.start)));
+        if selected!=self.ivars().selected.get() {
+            let content=self.content_frame();
+            self.ivars().selected.set(selected);
+            self.set_content_frame(content);
+            NSView::setNeedsDisplay(self,true);
+            if let Some(w)=self.window(){w.invalidateCursorRectsForView(self);}
+        }
+    }
+    pub(super) fn diagram_link(&self)->Option<&str>{
+        let dest=&self.ivars().link.destination;
+        is_diagram_link(dest).then_some(dest.as_str())
+    }
+    fn open_diagram(&self)->bool{
+        let Some(id)=self.diagram_link() else{return false};
+        if let Some(open)=DIAGRAM_OPEN.with(Cell::get){open(id);return true}
+        false
+    }
     unsafe fn position(&self) -> f64 {
         let Some(text) = self.ivars().text.load() else {
             return 0.0;
         };
-        let span = (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0 - self.frame().size.width)
+        let span = (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0 - self.content_frame().size.width)
             .max(1.0);
-        ((self.frame().origin.x - EDITOR_INSET) / span).clamp(0.0, 1.0)
+        ((self.content_frame().origin.x - EDITOR_INSET) / span).clamp(0.0, 1.0)
     }
-    unsafe fn commit_layout(&self, width: f64, x: f64, wrap: bool) {
+    fn target(&self, original: NSRect, frame: NSRect) -> Option<DropAnchor> {
+        if (frame.origin.y - original.origin.y).abs() < 3. { return None; }
         let link = &self.ivars().link;
-        self.replace(&link.markdown(&link.destination, width, x, wrap));
+        let anchors = self.ivars().targets.borrow();
+        let target = anchors.iter().rev().find(|a| a.top <= frame.origin.y + 0.5)
+            .or_else(|| anchors.first()).copied()?;
+        // The paragraph immediately after the image already shares its anchor.
+        (target.byte != link.bytes.start && (target.byte != link.bytes.end + 2 || target.block)).then_some(target)
+    }
+    fn show_anchor(&self, target: Option<DropAnchor>) {
+        if let Some(text) = self.ivars().text.load() {
+            if let Some(editor) = text.downcast_ref::<MarkdownEditor>() {
+                let y = target.map(|a| a.top);
+                if editor.ivars().image_drop_line.replace(y) != y { text.setNeedsDisplay(true); }
+            }
+        }
+    }
+    fn clear_preview(&self) {
+        if let Some(view) = self.ivars().preview.borrow_mut().take() { view.removeFromSuperview(); }
+    }
+    unsafe fn preview_move(&self, text: &NSTextView, original: NSRect, frame: NSRect) {
+        let mut source = text.string().to_string();
+        let Some((span, replacement, selected)) = self.layout_edit(&source, original, frame, true) else { return };
+        source.replace_range(span, &replacement);
+        let mut preview = self.ivars().preview.borrow_mut();
+        let view = preview.get_or_insert_with(|| {
+            let (scroll, view) = make_editor(text.bounds());
+            scroll.setDocumentView(None);
+            view.setAllowsUndo(false);
+            view.setFrame(text.bounds());
+            text.addSubview(&view);
+            view
+        });
+        view.setString(&NSString::from_str(&source));
+        if let Some(editor) = view.downcast_ref::<MarkdownEditor>() {
+            editor.ivars().selected_image.set(Some(selected));
+        }
+        render_markdown(view, self.ivars().base.as_deref(), None);
+        if let Some(editor) = view.downcast_ref::<MarkdownEditor>() {
+            let line = self.target(original, frame).and_then(|_|
+                layout_fragment_rect(view, source[..selected].encode_utf16().count()));
+            editor.ivars().image_drop_line.set(line.map(|r| r.origin.y));
+            view.setNeedsDisplay(true);
+        }
+    }
+    unsafe fn layout_edit(&self, source: &str, original: NSRect, frame: NSRect, moving: bool)
+        -> Option<(Range<usize>, String, usize)> {
+        if fingerprint(source) != self.ivars().fingerprint { return None; }
+        let link = &self.ivars().link;
+        let target = moving.then(|| self.target(original,frame)).flatten();
+        let y = target.map_or(link.y + frame.origin.y - original.origin.y, |a| frame.origin.y - a.top);
+        let wrap = if moving { !target.is_some_and(|a| a.block) } else { link.wrap };
+        let width = if moving { link.width.unwrap_or(frame.size.width) } else { frame.size.width };
+        let markup = link.markdown_at(&link.destination, width, self.position(), wrap, y);
+        let mut selected = link.bytes.start;
+        if let Some(anchor) = target {
+            let end = link.bytes.end + if source[link.bytes.end..].starts_with("\n\n") { 2 } else { 0 };
+            let (span, replacement) = if anchor.byte >= end {
+                let between = &source[end..anchor.byte];
+                selected += between.len();
+                (link.bytes.start..anchor.byte, format!("{between}{markup}\n\n"))
+            } else if anchor.byte < link.bytes.start {
+                selected = anchor.byte;
+                (anchor.byte..end, format!("{markup}\n\n{}", &source[anchor.byte..link.bytes.start]))
+            } else { return None };
+            Some((span, replacement, selected))
+        } else {
+            Some((link.bytes.clone(), markup, selected))
+        }
+    }
+    unsafe fn commit_layout(&self, original: NSRect, frame: NSRect, moving: bool) {
+        let Some(text) = self.ivars().text.load() else { return };
+        let source = text.string().to_string();
+        let Some((span, replacement, selected)) = self.layout_edit(&source, original, frame, moving) else { return };
+        self.replace_range(&replacement, utf16_range(&source, span));
+        select_image(&text, Some(selected));
     }
     unsafe fn replace(&self, replacement: &str) {
+        self.replace_range(replacement, self.ivars().range);
+    }
+    unsafe fn replace_range(&self, replacement: &str, old: NSRange) {
         let _keep = Retained::retain(self as *const Self as *mut Self);
         let Some(text) = self.ivars().text.load() else {
             return;
@@ -547,11 +812,11 @@ impl InlineImage {
         }
         let selection: NSRange = msg_send![&*text, selectedRange];
         let scroll = text.visibleRect().origin;
-        let old = self.ivars().range;
+
         let delta = replacement.encode_utf16().count() as isize - old.length as isize;
         INTERACTING.with(|v| v.set(false));
         text.breakUndoCoalescing();
-        let _: () = msg_send![&*text,insertText:&*NSString::from_str(replacement),replacementRange:self.ivars().range];
+        let _: () = msg_send![&*text,insertText:&*NSString::from_str(replacement),replacementRange:old];
         text.breakUndoCoalescing();
         let restored = if selection.location >= old.location + old.length {
             NSRange::new(

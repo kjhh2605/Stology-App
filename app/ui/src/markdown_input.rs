@@ -226,6 +226,9 @@ pub fn fenced_caret(source: &str, caret: usize, backwards: bool) -> Option<usize
             });
         }
         if block.closing.is_some() && block.body.end < caret && caret <= block.bytes.end {
+            if caret == block.bytes.end && source[..caret].ends_with('\n') {
+                return None;
+            }
             return Some(if backwards {
                 block.body.end
             } else {
@@ -330,30 +333,42 @@ fn list_or_quote_prefix(line: &str) -> Option<Prefix> {
     })
 }
 
+/// Resolve the structural newlines emitted by block insertion along with the
+/// block. Additional blank paragraphs belong to the writer.
+fn preceding_block(source: &str, caret: usize) -> Option<Range<usize>> {
+    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
+    for (event, range) in Parser::new_ext(source, Options::all()).into_offset_iter() {
+        let Some(gap) = source.get(range.end..caret) else { continue };
+        let raw = &source[range.clone()];
+        let adjacent = match event {
+            Event::Start(Tag::Table(_)) => gap.is_empty()
+                || super::table_separator(source, range.end).is_some_and(|r| r.end == caret),
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
+                let Some((first, rest)) = raw.split_once('\n') else { continue };
+                let Some((marker, _)) = opening(first) else { continue };
+                rest.lines().last().is_some_and(|last| is_closing(last, marker))
+                    && (gap.is_empty() || (!raw.ends_with('\n') && matches!(gap, "\n" | "\r\n")))
+            }
+            Event::Start(Tag::Image { dest_url, .. }) if super::image_edit::is_diagram_link(&dest_url) => {
+                gap.is_empty() || (source[..range.start].rsplit('\n').next().unwrap_or("").trim().is_empty()
+                    && matches!(gap, "\n" | "\r\n" | "\n\n" | "\r\n\r\n"))
+            }
+            _ => false,
+        };
+        if adjacent { return Some(range.start..caret); }
+    }
+    None
+}
+
 /// Return one source edit for a collapsed selection, or let native text editing
 /// handle the command. Invalid offsets are rejected instead of panicking.
 pub fn command(source: &str, caret: usize, command: Command) -> Option<Edit> {
     if caret > source.len() || !source.is_char_boundary(caret) {
         return None;
     }
-    // A rendered table conceals its Markdown source. At the boundary just
-    // after it, delete the complete parsed block as one undoable edit.
     if command == Command::Backspace {
-        for (event, range) in pulldown_cmark::Parser::new_ext(
-            source,
-            pulldown_cmark::Options::ENABLE_TABLES,
-        )
-        .into_offset_iter()
-        {
-            if matches!(event, pulldown_cmark::Event::Start(pulldown_cmark::Tag::Table(_)))
-                && caret == range.end
-            {
-                return Some(Edit {
-                    caret: range.start,
-                    range,
-                    replacement: String::new(),
-                });
-            }
+        if let Some(range) = preceding_block(source, caret) {
+            return Some(Edit { caret: range.start, range, replacement: String::new() });
         }
     }
     let ending = newline(source);
@@ -531,7 +546,24 @@ mod tests {
         let table = "| A | B |\n| - | - |\n| 1 | 2 |";
         assert_eq!(apply(table, table.len(), Command::Backspace), (String::new(), 0));
         let code = "```\n| A | B |\n| - | - |\n```\n";
-        assert!(command(code, code.len(), Command::Backspace).is_none());
+        assert_eq!(apply(code, code.len(), Command::Backspace), (String::new(), 0));
+    }
+    #[test]
+    fn backspace_at_attachment_boundaries() {
+        let link = "![회로](<../.diagram/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.svg>)";
+        for ending in ["\n", "\r\n"] {
+            for block in [format!("{link}{ending}{ending}"), format!("~~~rs{ending}😀{ending}~~~{ending}"),
+                format!("| 열 |{ending}| --- |{ending}| 값 |{ending}{ending}")] {
+                let prefix = format!("앞{ending}{ending}");
+                let source = format!("{prefix}{block}뒤");
+                assert_eq!(apply(&source, prefix.len()+block.len(), Command::Backspace),
+                    (format!("{prefix}뒤"), prefix.len()));
+            }
+        }
+        for text in [format!("`{link}`"), format!("    {link}"), "~~~rs\n미완성".into(),
+            "![이미지](pic.png)\n".into(), format!("{link}\n\n\n")] {
+            assert!(command(&text, text.len(), Command::Backspace).is_none());
+        }
     }
     #[test]
     fn bullet_tab_enter_outdent_exit_sequence() {
@@ -566,7 +598,7 @@ mod tests {
         assert!(command("    - literal", 13, Command::Tab).is_none());
     }
     fn apply(source: &str, caret: usize, key: Command) -> (String, usize) {
-        let edit = command(source, caret, key).expect("command should be handled");
+        let edit = command(source, caret, key).unwrap_or_else(|| panic!("unhandled {key:?} at {caret} in {source:?}"));
         assert!(
             source.is_char_boundary(edit.range.start) && source.is_char_boundary(edit.range.end)
         );

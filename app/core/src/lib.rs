@@ -1,3 +1,5 @@
+#[path = "../../shared/diagram_svg.rs"]
+pub mod diagram_svg;
 pub mod chat;
 mod antigravity;
 pub mod distill;
@@ -13,6 +15,13 @@ pub mod storage;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+
+pub fn document_title(input: &str) -> &str {
+    match input.trim() {
+        "" => "제목 없음",
+        title => title,
+    }
+}
 
 pub fn data_root() -> Result<PathBuf> {
     if let Some(root) = std::env::var_os("STOLOGY_DATA_DIR") {

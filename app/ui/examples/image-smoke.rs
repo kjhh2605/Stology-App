@@ -36,6 +36,40 @@ unsafe fn image(text: &NSTextView) -> Retained<NSView> {
         .expect("image overlay")
         .clone()
 }
+unsafe fn drag_body(view: &NSView, window: &NSWindow, dx: f64, dy: f64) {
+    let center = view.convertPoint_toView(view.bounds().mid(), None);
+    let parent = view.superview().unwrap().downcast::<NSTextView>().unwrap();
+    let before = parent.string().to_string();
+    let mut predicted = String::new();
+    let mut predicted_frame = NSRect::ZERO;
+    let mut wrap_rects = Vec::<NSRect>::new();
+    for (kind, progress) in [(NSEventType::LeftMouseDown, 0.), (NSEventType::LeftMouseDragged, 0.5),
+                             (NSEventType::LeftMouseDragged, 1.), (NSEventType::LeftMouseUp, 1.)] {
+        let point = NSPoint::new(center.x + dx * progress, center.y - dy * progress);
+        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            kind, point, NSEventModifierFlags::empty(), 0., window.windowNumber(), None, 0, 1, 1.).unwrap();
+        match kind {
+            NSEventType::LeftMouseDown => view.mouseDown(&event),
+            NSEventType::LeftMouseDragged => {
+                view.mouseDragged(&event);
+                assert_eq!(parent.string().to_string(), before);
+                let preview = parent.subviews().into_iter().find_map(|child| child.downcast::<NSTextView>().ok()).expect("live preview before mouse-up");
+                predicted = preview.string().to_string();
+                predicted_frame = image(&preview).frame();
+                wrap_rects = preview.textContainer().unwrap().exclusionPaths().iter().map(|p| p.bounds()).collect();
+                assert_ne!(predicted, before);
+            }
+            _ => {
+                view.mouseUp(&event);
+                assert_eq!(parent.string().to_string(), predicted);
+                assert_eq!(image(&parent).frame(), predicted_frame);
+                let final_wrap: Vec<_> = parent.textContainer().unwrap().exclusionPaths().iter().map(|p| p.bounds()).collect();
+                assert_eq!(wrap_rects, final_wrap);
+                assert!(parent.subviews().iter().all(|v| v.downcast_ref::<NSTextView>().is_none()));
+            }
+        }
+    }
+}
 fn main() {
     unsafe {
         let mtm = MainThreadMarker::new().unwrap();
@@ -85,12 +119,30 @@ fn main() {
         assert!(pasted.contains("뒷 문단"));
         assert_eq!(text.textContainer().unwrap().exclusionPaths().len(), 1);
         assert!(image(&text).frame().size.width > 200.);
-        let _: () =
-            msg_send![&*image(&text),alignRight:std::ptr::null::<objc2::runtime::AnyObject>()];
+        let original=image(&text);
+        drag_body(&original, &window, 800., 0.);
         assert!(text.string().to_string().contains("x=1.000"));
         text.undoManager().unwrap().removeAllActions();
         let right = image(&text);
         assert!(right.frame().origin.x > 300.);
+        for (key, characters) in [(51, "\u{7f}"), (117, "\u{f728}")] {
+            let view = image(&text);
+            let point = view.convertPoint_toView(view.bounds().mid(), None);
+            for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+                let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                    kind, point, NSEventModifierFlags::empty(), 0., window.windowNumber(), None, 0, 1, 1.).unwrap();
+                if kind == NSEventType::LeftMouseDown { view.mouseDown(&event); } else { view.mouseUp(&event); }
+            }
+            let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                NSEventType::KeyDown, NSPoint::ZERO, NSEventModifierFlags::empty(), 0., window.windowNumber(), None,
+                &NSString::from_str(characters), &NSString::from_str(characters), false, key).unwrap();
+            text.keyDown(&event);
+            assert!(!text.string().to_string().contains("!["));
+            text.undoManager().unwrap().undo();
+            editor::style_with_base(&text, None);
+            assert!(text.string().to_string().contains("!["));
+        }
+        let right = image(&text);
         let _: () = msg_send![&*right,deleteImage:std::ptr::null::<objc2::runtime::AnyObject>()];
         assert!(!text.string().to_string().contains("!["));
         assert_eq!(text.textContainer().unwrap().exclusionPaths().len(), 0);
@@ -105,8 +157,9 @@ fn main() {
             msg_send![&*image(&text),deleteImage:std::ptr::null::<objc2::runtime::AnyObject>()];
         assert_eq!(text.string().to_string(), before);
         text.setEditable(true);
-        let _: () =
-            msg_send![&*image(&text),blockImage:std::ptr::null::<objc2::runtime::AnyObject>()];
+        let block=text.string().to_string().replace("wrap=1","wrap=0");
+        text.setString(&NSString::from_str(&block));
+        editor::style_with_base(&text,None);
         assert_eq!(text.textContainer().unwrap().exclusionPaths().len(), 0);
         assert!(text.string().to_string().contains("wrap=0"));
         // Verify actual TextKit line geometry, not just the presence of exclusion paths.
@@ -142,6 +195,40 @@ fn main() {
                 >= img.origin.x + img.size.width,
             "text overlaps floating image"
         );
+        // Real mouse events through the native overlay, followed by a fresh layout.
+        text.undoManager().unwrap().removeAllActions();
+        drag_body(&image(&text), &window, 40., 64.);
+        let moved = text.string().to_string();
+        assert!(moved.contains(";y=64"), "{moved}");
+        assert_eq!(moved.split_once("\n\n").unwrap().1, source.split_once("\n\n").unwrap().1);
+        text.setString(&NSString::from_str(&moved));
+        editor::style_with_base(&text, Some(&base));
+        assert!((image(&text).frame().origin.y - img.origin.y - 64.).abs() < 1.);
+        text.undoManager().unwrap().removeAllActions();
+        drag_body(&image(&text), &window, 0., -24.);
+        assert!(text.string().to_string().contains(";y=40"));
+        text.undoManager().unwrap().undo();
+        assert_eq!(text.string().to_string(), moved);
+
+        let paragraphs = format!("{}\n\n첫 문단\n\n둘째 문단\n\n셋째 문단", source.split_once("\n\n").unwrap().0);
+        text.setString(&NSString::from_str(&paragraphs));
+        editor::style_with_base(&text, Some(&base));
+        text.undoManager().unwrap().removeAllActions();
+        drag_body(&image(&text), &window, 0., 300.);
+        let relocated = text.string().to_string();
+        assert!(relocated.starts_with("첫 문단\n\n둘째 문단\n\n!["), "{relocated}");
+        assert!(relocated.ends_with("\n\n셋째 문단"));
+        text.undoManager().unwrap().undo();
+        assert_eq!(text.string().to_string(), paragraphs);
+        for protected in ["```rust\nlet a = 1;\n```", "| 항목 | 값 |\n|---|---|\n| 가 | 나 |"] {
+            let before = format!("{}\n\n첫 문단\n\n{protected}", source.split_once("\n\n").unwrap().0);
+            text.setString(&NSString::from_str(&before));
+            editor::style_with_base(&text, Some(&base));
+            drag_body(&image(&text), &window, 0., 280.);
+            let after = text.string().to_string();
+            assert!(after.starts_with("첫 문단\n\n!["), "{after}");
+            assert!(after.ends_with(protected) && after.contains("wrap=0"), "{after}");
+        }
         let multiple="![one](이미지/test.png \"stology:width=240;x=0;wrap=1\")\n\n![two](이미지/test.png \"stology:width=240;x=0;wrap=1\")\n\n필기";
         text.setString(&NSString::from_str(multiple));
         editor::style_with_base(&text, Some(&base));
@@ -243,6 +330,31 @@ fn main() {
         let _: () = msg_send![&*text,deleteBackward:std::ptr::null::<objc2::runtime::AnyObject>()];
         let _: () = msg_send![&*text,deleteForward:std::ptr::null::<objc2::runtime::AnyObject>()];
         assert_eq!(text.string().to_string(), "![only](이미지/test.png)");
+        let diagram_dir = base.join(".diagram");
+        std::fs::create_dir_all(&diagram_dir).unwrap();
+        std::fs::write(diagram_dir.join("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"80\"><rect width=\"120\" height=\"80\" fill=\"red\"/></svg>").unwrap();
+        let diagram = "![도형](<.diagram/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.svg>)\n\n본문";
+        for (key, characters) in [(51, "\u{7f}"), (117, "\u{f728}")] {
+            text.setString(&NSString::from_str(diagram));
+            editor::style_with_base(&text, Some(&base));
+            text.undoManager().unwrap().removeAllActions();
+            let view = image(&text);
+            let point = view.convertPoint_toView(view.bounds().mid(), None);
+            for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+                let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                    kind, point, NSEventModifierFlags::empty(), 0., window.windowNumber(), None, 0, 1, 1.).unwrap();
+                if kind == NSEventType::LeftMouseDown { view.mouseDown(&event); } else { view.mouseUp(&event); }
+            }
+            let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                NSEventType::KeyDown, NSPoint::ZERO, NSEventModifierFlags::empty(), 0., window.windowNumber(), None,
+                &NSString::from_str(characters), &NSString::from_str(characters), false, key).unwrap();
+            text.keyDown(&event);
+            assert!(!text.string().to_string().contains(".diagram/"));
+            assert!(text.string().to_string().contains("본문"));
+            text.undoManager().unwrap().undo();
+            assert_eq!(text.string().to_string(), diagram);
+        }
         println!("PASS: paste / relative image / wrapping geometry / alignment / delete / undo / read-only / block");
     }
 }

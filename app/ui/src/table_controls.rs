@@ -1,3 +1,5 @@
+const EMPTY_NOTE_TABLE: &str = "|  |  |\n| --- | --- |\n|  |  |\n\n";
+
 unsafe fn table_shortcut(text: &NSTextView, event: &NSEvent) -> bool {
     use NSEventModifierFlags as Flags;
     let modifiers = Flags::Command | Flags::Option | Flags::Shift | Flags::Control;
@@ -24,7 +26,7 @@ unsafe fn table_shortcut(text: &NSTextView, event: &NSEvent) -> bool {
         }
         block.push('\n');
     }
-    block.push_str("|  |  |\n| --- | --- |\n|  |  |\n\n");
+    block.push_str(EMPTY_NOTE_TABLE);
     text.breakUndoCoalescing();
     let _: () = msg_send![text, insertText:&*NSString::from_str(&block), replacementRange:utf16_range(&source,start..end)];
     text.breakUndoCoalescing();

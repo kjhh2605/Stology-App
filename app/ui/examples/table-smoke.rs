@@ -175,6 +175,70 @@ unsafe fn check_after_table_caret(text: &NSTextView, window: &NSWindow) {
     assert!((typed - extra_blank - 24.0).abs() < 1.0, "an extra blank line should remain visible");
 }
 
+unsafe fn check_block_clicks(text: &NSTextView, window: &NSWindow) {
+    let click = |point| {
+        let position = text.convertPoint_toView(point, None);
+        let event = |kind| NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            kind, position, NSEventModifierFlags::empty(), 0., window.windowNumber(), None, 1, 1, 1.).unwrap();
+        window.discardEventsMatchingMask_beforeEvent(NSEventMask::LeftMouseUp, None);
+        window.postEvent_atStart(&event(NSEventType::LeftMouseUp), true);
+        let _: () = msg_send![text, mouseDown:&*event(NSEventType::LeftMouseDown)];
+    };
+    let caret_rect = || {
+        let selection: NSRange = msg_send![text, selectedRange];
+        let screen: NSRect = msg_send![text,firstRectForCharacterRange:selection actualRange:std::ptr::null_mut::<NSRange>()];
+        text.convertRect_fromView(window.convertRectFromScreen(screen), None)
+    };
+    let insert = |value| {
+        let selection: NSRange = msg_send![text,selectedRange];
+        let _: () = msg_send![text,insertText:&*NSString::from_str(value),replacementRange:selection];
+    };
+    let table = "| 열 | 값 |\n| --- | --- |\n| 😀 | 2 |\n\n";
+    text.setString(&NSString::from_str(&format!("{table}뒤 문단")));
+    text.setSelectedRange(NSRange::new(text.string().length(),0));
+    editor::style(text);
+    let frame = cells(text)[0].superview().unwrap().frame();
+    let side = NSPoint::new(frame.origin.x + frame.size.width + 25., frame.origin.y + 38.);
+    click(side);
+    insert("오른쪽");
+    let caret = caret_rect();
+    assert!(caret.origin.x > frame.origin.x + frame.size.width && (side.y - caret.origin.y).abs() < 24.,
+        "side click {side:?} placed text at {caret:?}");
+    assert!(text.string().to_string().ends_with("뒤 문단") && cells(text).len() == 4);
+    click(NSPoint::new(side.x, side.y - 24.));
+    insert("윗줄");
+    assert!(text.string().to_string().contains("윗줄\n오른쪽"), "{:?}, caret {:?}, table {:?}", text.string().to_string(), caret_rect(), frame);
+    for block in [table, "```rs\nfn example() {}\n```\n", "```rs\nfn example() {}\n```"] {
+        text.setString(&NSString::from_str(block));
+        text.setSelectedRange(NSRange::new(text.string().length(),0));
+        editor::style(text);
+        let below = NSPoint::new(80., 280.);
+        click(below);
+        insert("아래 본문");
+        let caret = caret_rect();
+        assert!((below.y - caret.origin.y).abs() < 24.,
+            "below click {below:?} placed text at {caret:?} for {:?}", text.string().to_string());
+        assert!(text.string().to_string().ends_with("\n아래 본문"));
+    }
+    let base = tempfile::tempdir().unwrap();
+    let filename = ".diagram/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.svg";
+    std::fs::create_dir(base.path().join(".diagram")).unwrap();
+    std::fs::write(base.path().join(filename), r#"<svg xmlns="http://www.w3.org/2000/svg" width="170" height="80"><rect width="170" height="80"/></svg>"#).unwrap();
+    let source = format!("![그림](<{filename}> \"stology:width=170;x=0;wrap=1\")\n\n");
+    text.setString(&NSString::from_str(&source));
+    text.setSelectedRange(NSRange::new(text.string().length(), 0));
+    editor::style_with_base(text, Some(base.path()));
+    let image = text.subviews().into_iter().find(|v| v.isKindOfClass(class!(StologyInlineMarkdownImage))).unwrap();
+    let frame = image.frame();
+    let below = NSPoint::new(64., frame.origin.y + frame.size.height + 3.);
+    click(below);
+    let at = caret_rect();
+    assert!(at.origin.x < 64., "caret for {below:?} is beside diagram {frame:?}: {at:?}");
+    let _: () = msg_send![text, deleteBackward:std::ptr::null::<AnyObject>()];
+    assert!(text.string().to_string().trim().is_empty(), "diagram still present: {:?}", text.string().to_string());
+
+}
+
 fn main() {
     unsafe {
         let mtm = MainThreadMarker::new().unwrap();
@@ -185,6 +249,10 @@ fn main() {
         let window: Retained<SmokeWindow> = msg_send![allocated, initWithContentRect:frame styleMask:NSWindowStyleMask::Titled backing:NSBackingStoreType::Buffered defer:false];
         window.setContentView(Some(&scroll));
         check_after_table_caret(&text, &window);
+        check_block_clicks(&text, &window);
+        // Each fixture replaces the document, as the app does when opening another note.
+        let undo: Retained<AnyObject> = msg_send![&*text, undoManager];
+        let _: () = msg_send![&*undo, removeAllActions];
         let original = "# Table\n\n| **열** | 값 |\n|:---|---:|\n| 한글 | 😀 |\n\n끝";
         text.setString(&NSString::from_str(original));
         text.setSelectedRange(NSRange::new(0, 0));
@@ -265,7 +333,7 @@ fn main() {
         editor::style(&text);
         assert!(cells(&text).iter().all(|cell| !cell.isEditable()));
         window.setContentView(None);
-        println!("PASS: live row and column previews, drag reversal before commit, exact table cell edits, Unicode and pipe escaping, shifted neighbor offsets, native undo, field editor lifetime, marked-text preservation, read-only cells.");
+        println!("PASS: clicks beside and below blocks, diagram boundary backspace, live row and column previews, drag reversal before commit, exact table cell edits, Unicode and pipe escaping, shifted neighbor offsets, native undo, field editor lifetime, marked-text preservation, read-only cells.");
         println!("NOT TESTED: real keyboard/IME or pointer navigation.");
     }
 }

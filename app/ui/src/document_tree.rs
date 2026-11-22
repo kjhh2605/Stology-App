@@ -4,7 +4,7 @@ use objc2::{
     define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, ProtocolObject, Sel},
-    sel, DefinedClass, MainThreadOnly,
+    sel, AllocAnyThread, DefinedClass, MainThreadOnly,
 };
 use objc2_app_kit::*;
 use objc2_foundation::*;
@@ -27,6 +27,7 @@ pub enum Event {
     Reconvert(Value),
     ToggleFolder(String, bool),
     Rename(Value),
+    Delete(Value),
     CommitRename(Value, String),
     Move(Value, String),
     CopyFiles(Vec<String>, String),
@@ -465,6 +466,10 @@ define_class!(
         fn rename_folder(&self, _sender: Option<&AnyObject>) { enqueue(Event::RenameFolder(self.ivars().context_parent.borrow().clone())); }
         #[unsafe(method(newFolder:))]
         fn new_folder(&self, _sender: Option<&AnyObject>) { enqueue(Event::NewFolder(self.ivars().context_parent.borrow().clone())); }
+        #[unsafe(method(deleteDocument:))]
+        fn delete_document(&self, _sender: Option<&AnyObject>) {
+            if let Some(doc) = self.ivars().context_document.borrow().clone() { enqueue(Event::Delete(doc)); }
+        }
         #[unsafe(method(renameDocument:))]
         fn rename(&self, _sender: Option<&AnyObject>) {
             // A context action targets the clicked file without opening it.
@@ -754,6 +759,13 @@ impl DocumentTree {
                 finder.setRepresentedObject(Some(&NSString::from_str(&path.to_string_lossy())));
             }
             menu.addItem(&finder);
+            if node.document.is_some() {
+                let title = NSString::from_str("삭제");
+                let item = NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm()), &title, Some(sel!(deleteDocument:)), &NSString::from_str(""));
+                item.setTarget(Some(self));
+                style_delete_item(&item, &title);
+                menu.addItem(&item);
+            }
         }
     }
     pub unsafe fn reveal_folder(&self, path: &str) {
@@ -1235,4 +1247,12 @@ mod tests {
         assert!(!analysis_enabled(&json!({"kind":"draft"}), false));
         assert!(!analysis_enabled(&json!({"kind":"ppt"}), false));
     }
+}
+
+pub(crate) unsafe fn style_delete_item(item: &NSMenuItem, title: &NSString) {
+    let red = NSColor::systemRedColor();
+    item.setImage(theme::palette_icon("trash",13.,&red,&red).as_deref());
+    let colored = NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), title);
+    colored.addAttribute_value_range(NSForegroundColorAttributeName, &NSColor::systemRedColor(), NSRange::new(0, title.length()));
+    item.setAttributedTitle(Some(&colored));
 }

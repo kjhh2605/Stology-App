@@ -805,6 +805,38 @@ pub fn handle(root: &Path, request: &Value) -> Result<Value> {
                 json!({"entries":a,"folders":f,"root_path":b})
             }
         }
+        "note.diagram.save" | "note.diagram.read" => {
+            let b = base(root, &tx, required(request, "workspace_id")?)?;
+            let folder = relative(optional(request, "folder"))?;
+            let existing = !request["id"].is_null();
+            let id = if existing { Uuid::parse_str(required(request,"id")?)? } else { Uuid::new_v4() };
+            let dir = b.join(".diagram");
+            let path = dir.join(format!("{id}.svg"));
+            ensure_no_symlink(&b, &path)?;
+            if existing {
+                anyhow::ensure!(path.is_file() && fs::metadata(&path)?.len() <= crate::diagram_svg::LIMIT as u64, "다이어그램 파일을 열 수 없습니다");
+            }
+            if op == "note.diagram.read" {
+                let bytes = fs::read(&path)?;
+                let (diagram, title) = crate::diagram_svg::Diagram::read(std::str::from_utf8(&bytes)?)?;
+                json!({"diagram":diagram,"title":title,"hash":digest(&bytes)})
+            } else {
+                let diagram: crate::diagram_svg::Diagram = serde_json::from_value(request["diagram"].clone())?;
+                let mut title = request["title"].as_str().map(str::to_owned);
+                if existing {
+                    let bytes = fs::read(&path)?;
+                    anyhow::ensure!(required(request,"expected_hash")? == digest(&bytes), "다른 곳에서 수정한 다이어그램입니다");
+                    if title.is_none() {
+                        title = Some(crate::diagram_svg::Diagram::read(std::str::from_utf8(&bytes)?)?.1);
+                    }
+                }
+                let svg = diagram.svg(title.as_deref().unwrap_or_default())?;
+                fs::create_dir_all(&dir)?;
+                atomic_write(&path,svg.as_bytes(),existing)?;
+                let destination = format!("{}.diagram/{id}.svg","../".repeat(folder.components().count()));
+                json!({"destination":destination,"image_base":b,"path":path,"id":id})
+            }
+        }
         "note.image.import" => {
             let w = required(request, "workspace_id")?;
             let b = base(root, &tx, w)?;
@@ -1167,6 +1199,44 @@ mod tests {
         assert_eq!(d["title"], "제목 없음");
     }
 
+    #[test]
+    fn diagram_save_edit_rebase_and_symlink_rejection() {
+        use crate::diagram_svg::{Element,Kind};
+        let t=tempfile::tempdir().unwrap();let w=ws(t.path());
+        let item=Element::new(1,Kind::Rect,[50.,60.]);
+        let mut req=json!({"op":"note.diagram.save","workspace_id":w,"diagram":[item]});
+        let empty = json!({"op":"note.diagram.save","workspace_id":w,"diagram":[],"title":"이름만"});
+        assert!(handle(t.path(), &empty).is_err());
+        req["title"] = json!("첫 이름");
+        let image=call(t.path(),req.clone());let path=Path::new(image["path"].as_str().unwrap());
+        let read=json!({"op":"note.diagram.read","workspace_id":w,"id":image["id"]});
+        req["expected_hash"]=call(t.path(),read.clone())["hash"].clone();req["id"]=image["id"].clone();
+        req["diagram"][0]["text"]=json!("수정");assert_eq!(call(t.path(),req.clone()),image);
+        let saved = call(t.path(), read.clone());
+        assert_eq!(saved["diagram"][0]["text"], "수정");
+        assert_eq!(saved["title"], "첫 이름");
+        let mut rename = req.clone();
+        rename["title"] = json!(" 바꾼 이름 ");
+        rename["expected_hash"] = saved["hash"].clone();
+        call(t.path(), rename.clone());
+        let renamed = call(t.path(), read.clone());
+        assert_eq!(renamed["title"], "바꾼 이름");
+        rename["diagram"] = json!([]);
+        rename["expected_hash"] = renamed["hash"].clone();
+        assert!(handle(t.path(), &rename).is_err());
+        assert_eq!(call(t.path(), read), renamed);
+        assert!(handle(t.path(),&req).is_err());
+        let body=format!("![다이어그램](<{}>)", image["destination"].as_str().unwrap());
+        let d=draft(t.path(),&w,&body);
+        call(t.path(),json!({"op":"folder.create","workspace_id":w,"name":"단원"}));
+        let n=call(t.path(),json!({"op":"note.save","draft_id":d["id"],"title":"필기","folder":"단원"}));
+        assert!(n["body"].as_str().unwrap().contains("../.diagram/"));
+        let moved=call(t.path(),json!({"op":"note.move","id":n["id"],"folder":""}));assert_eq!(moved["body"],body);
+        let tree=call(t.path(),json!({"op":"tree","workspace_id":w}));assert!(!tree["folders"].to_string().contains(".diagram"));
+        fs::remove_file(path).unwrap();std::os::unix::fs::symlink(t.path().join("elsewhere"),path).unwrap();
+        assert!(handle(t.path(),&req).is_err());
+        req["id"]=json!("../escape");assert!(handle(t.path(),&req).is_err());
+    }
     #[test]
     fn pasted_images_dedupe_rebase_and_survive_deletion() {
         let t=tempfile::tempdir().unwrap(); let w=ws(t.path());

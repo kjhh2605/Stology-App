@@ -22,6 +22,7 @@ mod chat_panel;
 mod chat_messages;
 mod chat_rich_text;
 mod chat_attachments;
+mod diagram_canvas;
 mod document_tree;
 mod editor;
 mod font;
@@ -44,6 +45,8 @@ mod sidebar_hide;
 mod sidebar_reveal;
 mod theme;
 mod window_appearance;
+
+const TITLE_DIVIDER_INSET: f64 = 14.;
 
 define_class!(
     #[unsafe(super(NSTextField, NSControl, NSView, NSResponder))]
@@ -79,6 +82,7 @@ define_class!(
             let ready = STATE.with(|state| {
                 let Ok(mut state) = state.try_borrow_mut() else { return None; };
                 Some(state.as_mut().map(|s| unsafe {
+                    if !s.discard_diagram(){return Err("다이어그램 편집을 계속합니다".to_owned());}
                     s.poll_pdf_sessions();
                     if !s.chat.prepare_quit()? { return Ok(false); }
                     if !s.flush_body() || !s.finish_new_title(true) { return Err("현재 노트를 저장하지 못했습니다".to_owned()); }
@@ -281,6 +285,7 @@ enum Action {
     NewWorkspace,
     RenameWorkspace(String, String),
     DeleteWorkspace(String, String),
+    DeleteDocument(Value),
     Save,
     Delete,
     ToggleMap,
@@ -354,7 +359,28 @@ impl Pending {
         let _ = rpc(json!({"op":"analysis.cancel_active"}));
     }
 }
+struct WorkspaceScreen {
+    blank_title: String,
+    file_query: String,
+    document: Option<Value>,
+    evidence: Option<Value>,
+    selection: NSRange,
+    scroll: NSPoint,
+    map_open: bool,
+    folders: HashSet<String>,
+    pdf_page: Option<usize>,
+}
+
+unsafe fn pdf_view(view: &NSView) -> Option<Retained<NSView>> {
+    if view.isKindOfClass(objc2::class!(PDFView)) {
+        return Some(objc2::Message::retain(view));
+    }
+    view.subviews().iter().find_map(|child| pdf_view(&child))
+}
+
 struct State {
+    screens: std::collections::HashMap<String, WorkspaceScreen>,
+    current_evidence: Option<Value>,
     target: Retained<Delegate>,
     workspace_rows: Vec<(String, Retained<NSView>, Retained<NSButton>)>,
     workspace_rename: Option<(String, String, Retained<NSTextField>)>,
@@ -398,6 +424,7 @@ struct State {
     subtitle: Retained<NSTextField>,
     status: Retained<NSTextField>,
     ai_spinner: Retained<NSProgressIndicator>,
+    diagram: Option<diagram_canvas::Canvas>,
     save_button: Retained<NSButton>,
     delete_button: Retained<NSButton>,
     map_button: Retained<NSButton>,
@@ -955,7 +982,7 @@ impl State {
                 frame.size.height - 20.,
             )));
         }
-        let b = if matches!(action, Action::Workspace(_)) {
+        let b = if draft_row || matches!(action, Action::Workspace(_)) {
             let row: Retained<document_tree::WorkspaceRow> = msg_send![document_tree::WorkspaceRow::alloc(mtm()),initWithFrame:frame];
             row.setTarget(Some(&self.target));
             row.setAction(Some(sel!(action:)));
@@ -1029,7 +1056,14 @@ impl State {
     }
     unsafe fn layout_status(&self, width: f64) {
         let x = if self.ai_spinner.isHidden() { 26. } else { 46. };
-        self.status.setFrame(rect(x, 18., (width - x - 194.).max(0.), 20.));
+        let height = self.status.frame().size.height;
+        let y = if self.diagram.is_some() {
+            let line_bottom = height - self.status.firstBaselineOffsetFromTop()
+                + self.status.font().map_or(0., |font| font.descender());
+            (TITLE_DIVIDER_INSET - line_bottom).round()
+        } else { 18. };
+        self.status.setFrame(rect(x, y, (width - x - 194.).max(0.), height));
+        self.ai_spinner.setFrameOrigin(NSPoint::new(26., y + 4.));
     }
     unsafe fn update_ai_spinner(&self) {
         let active = self.workspace.is_some() && (self.chat.busy() || self.job.is_some()
@@ -1649,11 +1683,7 @@ impl State {
                     item.setTag(self.register(action));
                     item.setImage(theme::icon(icon, 13.).as_deref());
                     if icon == "trash" {
-                        let red = NSColor::systemRedColor();
-                        item.setImage(theme::palette_icon("trash",13.,&red,&red).as_deref());
-                        let colored = NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &title);
-                        colored.addAttribute_value_range(NSForegroundColorAttributeName, &NSColor::systemRedColor(), NSRange::new(0, title.length()));
-                        item.setAttributedTitle(Some(&colored));
+                        document_tree::style_delete_item(&item, &title);
                     }
                     menu.addItem(&item);
                 }
@@ -1824,16 +1854,26 @@ impl State {
                 let list = view(rect(0., 0., w - 24., ch));
                 for (i, d) in drafts.iter().enumerate() {
                     let title = d["title"].as_str().unwrap_or("제목 없음");
-                    self.row(
-                        &list,
+                    let container = view(rect(3., ch - 37. - i as f64 * 40., w - 26., 32.));
+                    list.addSubview(&container);
+                    let row = self.row(
+                        &container,
                         title,
-                        rect(3., ch - 37. - i as f64 * 40., w - 26., 32.),
+                        container.bounds(),
                         Action::Open(d.clone()),
                         "doc",
                         self.document
                             .as_ref()
                             .is_some_and(|current| current["id"] == d["id"]),
                     );
+                    let menu = NSMenu::new(mtm());
+                    let title = NSString::from_str("삭제");
+                    let item = NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm()), &title, Some(sel!(action:)), &NSString::from_str(""));
+                    item.setTarget(Some(&self.target));
+                    item.setTag(self.register(Action::DeleteDocument(d.clone())));
+                    document_tree::style_delete_item(&item, &title);
+                    menu.addItem(&item);
+                    row.setMenu(Some(&menu));
                 }
                 let scroll = NSScrollView::initWithFrame(
                     NSScrollView::alloc(mtm()),
@@ -1876,7 +1916,7 @@ impl State {
         }
     }
     unsafe fn update_analysis_help(&self) {
-        let visible = self.map.is_none() && !self.snapshot && self.workspace.is_some() && self.editing_suggestion().is_none();
+        let visible = self.diagram.is_none() && self.map.is_none() && !self.snapshot && self.workspace.is_some() && self.editing_suggestion().is_none();
         let draft = !self.document.as_ref().is_some_and(|d| d["path"].as_str().is_some_and(|p| !p.is_empty()));
         self.analysis_help.setHidden(!visible);
         let state = self.document.as_ref().map(|d| strv(d, "analysis_state")).unwrap_or_default();
@@ -1893,7 +1933,12 @@ impl State {
         let help_width = if visible { self.analysis_help.intrinsicContentSize().width.ceil() + 4. } else { 0. };
         let title_width = (size.width - 210. - if visible { help_width + 8. } else { 0. }).max(0.);
         self.header.setFrame(rect(28., size.height - 61., title_width, 38.));
-        theme::resize_soft_divider(&self.title_divider, rect(14., size.height - 91., (size.width - 28.).max(0.), 1.));
+        let diagram = self.diagram.is_some();
+        let left = if diagram { self.header.frame().origin.x } else { TITLE_DIVIDER_INSET };
+        let lift = if diagram { self.subtitle.frame().size.height } else { 0. };
+        theme::resize_soft_divider(&self.title_divider, rect(
+            left, size.height - 91. + lift, (size.width - left - TITLE_DIVIDER_INSET).max(0.), 1.,
+        ));
         self.analysis_help.setFrame(rect((size.width - 182. - help_width).max(28.), size.height - 49., help_width, 18.));
     }
     fn editing_suggestion(&self) -> Option<&Value> {
@@ -1901,6 +1946,8 @@ impl State {
     }
     unsafe fn update_header(&mut self) {
         let needs_workspace = self.workspace.is_none();
+        let diagram_available = self.can_draw() && self.diagram.is_none();
+        editor::set_menu_diagram_action(&self.text, diagram_available.then_some(create_diagram_from_menu));
         self.workspace_welcome.setHidden(!needs_workspace);
         self.header.setHidden(needs_workspace);
         self.title_divider.setHidden(needs_workspace || self.map.is_some());
@@ -1913,7 +1960,9 @@ impl State {
         self.save_button.setKeyEquivalent(&NSString::from_str(if suggestion { "" } else { "s" }));
         self.map_button.setHidden(needs_workspace);
         self.editor_scroll.setHidden(needs_workspace || self.preview.is_some() || self.map.is_some());
-        let title = if self.map.is_some() {
+        let title = if let Some(canvas) = &self.diagram {
+            canvas.title.clone()
+        } else if self.map.is_some() {
             "지식지도".to_string()
         } else {
             self.document
@@ -1922,6 +1971,8 @@ impl State {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| self.blank_title.clone())
         };
+        let label = if self.diagram.is_some() { "다이어그램 제목" } else { "노트 제목" };
+        self.header.setAccessibilityLabel(Some(&NSString::from_str(label)));
         if !self.editing_new_title {
             self.header.setPlaceholderString(Some(&NSString::from_str("제목 없음")));
             self.header.setStringValue(&NSString::from_str(if title == "제목 없음" { "" } else { &title }));
@@ -1930,6 +1981,7 @@ impl State {
         self.header.setEditable(can_edit);
         self.header.setSelectable(can_edit);
         self.update_analysis_help();
+        self.layout_status(self.center.bounds().size.width);
         self.subtitle
             .setStringValue(&NSString::from_str(if self.map.is_some() {
                 "원본에서 발견한 개념과 관계"
@@ -2025,7 +2077,210 @@ impl State {
             } else {
                 "지식지도 펼치기 ↗"
             }));
+        if self.diagram.is_some(){
+            self.subtitle.setHidden(true);
+            self.save_button.setTitle(&NSString::from_str("완료"));self.save_button.setEnabled(true);
+            self.save_button.setAlphaValue(1.);self.save_button.setKeyEquivalent(&NSString::new());
+            self.delete_button.setTitle(&NSString::from_str("취소"));self.delete_button.setEnabled(true);
+            self.editor_scroll.setHidden(true);self.map_button.setHidden(true);
+        }else{self.delete_button.setTitle(&NSString::from_str("삭제"));}
     }
+    fn can_draw(&self) -> bool {
+        self.workspace.is_some()
+            && self.map.is_none()
+            && self.preview.is_none()
+            && !self.snapshot
+            && self
+                .document
+                .as_ref()
+                .is_none_or(|d| matches!(d["kind"].as_str(), Some("md" | "draft")))
+    }
+    unsafe fn start_diagram(&mut self, link: Option<&str>, from_insert_menu: bool) {
+        if !self.can_draw() || self.diagram.is_some() || !self.flush() {
+            return;
+        }
+        let mut data = stology_core::diagram_svg::Diagram::default();
+        let mut title = stology_core::document_title("").to_owned();
+        let mut existing = None;
+        if let Some(link) = link {
+            let folder = self
+                .document
+                .as_ref()
+                .and_then(|d| d["parent"].as_str())
+                .unwrap_or("");
+            let prefix = format!(
+                "{}.diagram/",
+                "../".repeat(std::path::Path::new(folder).components().count())
+            );
+            let Some(id) = link
+                .strip_prefix(&prefix)
+                .and_then(|f| f.strip_suffix(".svg"))
+            else {
+                return;
+            };
+            match rpc(json!({"op":"note.diagram.read","workspace_id":self.workspace,"id":id})) {
+                Ok(result) => match serde_json::from_value(result["diagram"].clone()) {
+                    Ok(d) => {
+                        data = d;
+                        title = stology_core::document_title(result["title"].as_str().unwrap_or("")).to_owned();
+                        existing = Some((id.to_owned(), strv(&result, "hash")));
+                    }
+                    Err(e) => {
+                        self.fail(&e.to_string());
+                        return;
+                    }
+                },
+                Err(e) => {
+                    self.set_status(&e);
+                    return;
+                }
+            }
+        }
+        let mut canvas =
+            diagram_canvas::Canvas::new(data, title, msg_send![&*self.text, selectedRange], existing);
+        canvas.insert_on_caret_line = from_insert_menu;
+        self.center.addSubview(&canvas.root);
+        self.diagram = Some(canvas);
+        self.text.setEditable(false);
+        self.update_header();
+        self.layout_diagram();
+        self.diagram.as_ref().unwrap().focus();
+        self.set_status("도구를 고르고 캔버스에서 드래그하세요");
+    }
+    fn layout_diagram(&self) {
+        let Some(canvas) = &self.diagram else { return };
+        let size = self.center.bounds().size;
+        let divider = self.title_divider.frame();
+        canvas.layout(rect(0., 0., size.width, (divider.origin.y - 1.).max(1.)), divider);
+    }
+    unsafe fn close_diagram(&mut self) {
+        if let Some(c) = self.diagram.take() {
+            c.root.removeFromSuperview();
+        }
+        self.text.setEditable(true);
+        self.update_header();
+        self._window.makeFirstResponder(Some(&self.text));
+    }
+    unsafe fn discard_diagram(&mut self) -> bool {
+        if self.diagram.is_none() { return true; }
+        self.finish_new_title(true);
+        if self.diagram.as_ref().is_some_and(|c| c.changed())
+            && !confirm_action(
+                "다이어그램 편집을 끝낼까요?",
+                "저장하지 않은 그림 변경 사항이 사라집니다.",
+                "변경 버리기",
+            )
+        {
+            return false;
+        }
+        self.close_diagram();
+        self.set_status("노트로 돌아왔습니다");
+        true
+    }
+    unsafe fn finish_diagram(&mut self) {
+        self.finish_new_title(true);
+        let Some(c) = &self.diagram else { return };
+        let data = c.document();
+        if !data.has_content() {
+            self.close_diagram();
+            self.set_status("빈 다이어그램은 저장하지 않았습니다");
+            return;
+        }
+        let selection = c.selection;
+        let insert_on_caret_line = c.insert_on_caret_line;
+        let existing = c.existing.clone();
+        let folder = self
+            .document
+            .as_ref()
+            .and_then(|d| d["parent"].as_str())
+            .unwrap_or("");
+        let req = json!({"op":"note.diagram.save","workspace_id":self.workspace,"folder":folder,"diagram":data,"title":c.title,
+            "id":existing.as_ref().map(|e|&e.0),"expected_hash":existing.as_ref().map(|e|&e.1)});
+        match rpc(req) {
+            Err(e) => self.fail(&e),
+            Ok(result) => {
+                self.close_diagram();
+                let base = self
+                    .document
+                    .as_ref()
+                    .and_then(document_base)
+                    .unwrap_or_else(|| {
+                        std::path::Path::new(result["image_base"].as_str().unwrap())
+                    });
+                if existing.is_none() {
+                    editor::insert_diagram(
+                        &self.text,
+                        selection,
+                        insert_on_caret_line,
+                        strv(&result, "destination").as_str(),
+                        base,
+                        editor::diagram_paint::content_bounds(&data).size.width.clamp(32., 520.),
+                    );
+                } else {
+                    editor::style_with_base(&self.text, Some(base));
+                }
+                self.capture_change();
+                self.set_status("다이어그램을 저장했습니다");
+            }
+        }
+    }
+    unsafe fn remember_screen(&mut self) {
+        let Some(id) = self.workspace.clone() else { return };
+        let pdf_page = self.preview.as_ref().and_then(|p| pdf_view(p)).and_then(|pdf| {
+            let page: Option<Retained<AnyObject>> = msg_send![&*pdf, currentPage];
+            let doc: Option<Retained<AnyObject>> = msg_send![&*pdf, document];
+            let (page, doc) = (page?, doc?);
+            Some(msg_send![&*doc, indexForPage: &*page])
+        });
+        let mut document = self.document.clone();
+        if let Some(d) = document.as_mut().filter(|d| d["kind"] == "suggestion") {
+            d["body"] = json!(self.last_text);
+        }
+        self.screens.insert(id, WorkspaceScreen {
+            blank_title: self.blank_title.clone(),
+            file_query: self.last_file_query.clone(),
+            document,
+            evidence: self.snapshot.then(|| self.current_evidence.clone()).flatten(),
+            selection: NSTextInputClient::selectedRange(&*self.text),
+            scroll: self.editor_scroll.contentView().bounds().origin,
+            map_open: self.map.is_some(),
+            folders: self.open_folders.clone(),
+            pdf_page,
+        });
+    }
+
+    unsafe fn restore_screen(&mut self) {
+        self.show_blank();
+        let screen = self.workspace.as_ref().and_then(|id| self.screens.remove(id));
+        self.last_file_query = screen.as_ref().map(|s| s.file_query.clone()).unwrap_or_default();
+        if let Some(field) = &self.file_search {
+            field.setStringValue(&NSString::from_str(&self.last_file_query));
+        }
+        let Some(screen) = screen else { return };
+        self.blank_title = screen.blank_title;
+        self.open_folders = screen.folders;
+        if let Some(e) = screen.evidence {
+            self.evidence(e);
+        } else if let Some(d) = screen.document {
+            self.open_doc(d);
+        }
+        let length = self.text.string().length();
+        let start = screen.selection.location.min(length);
+        self.text.setSelectedRange(NSRange::new(start, screen.selection.length.min(length - start)));
+        self.text.scrollPoint(screen.scroll);
+        if let Some((pdf, index)) = self.preview.as_ref().and_then(|p| pdf_view(p)).zip(screen.pdf_page) {
+            let doc: Option<Retained<AnyObject>> = msg_send![&*pdf, document];
+            if let Some(doc) = doc {
+                let count: usize = msg_send![&*doc, pageCount];
+                if index < count {
+                    let page: Option<Retained<AnyObject>> = msg_send![&*doc, pageAtIndex: index];
+                    if let Some(page) = page { let _: () = msg_send![&*pdf, goToPage: &*page]; }
+                }
+            }
+        }
+        if screen.map_open { self.open_map(); }
+    }
+
     unsafe fn show_blank(&mut self) {
         self.snapshot = false;
         self.document = None;
@@ -2091,6 +2346,7 @@ impl State {
         }
     }
     unsafe fn flush(&mut self) -> bool {
+        if !self.discard_diagram(){return false;}
         self.poll_pdf_sessions();
         pdf_session::request_flush_all();
         match pdf_session::flush_state() {
@@ -2196,7 +2452,15 @@ impl State {
             .currentEditor()
             .map(|e| e.string().to_string())
             .unwrap_or_else(|| self.header.stringValue().to_string());
-        let title = if title.trim().is_empty() { "제목 없음".to_owned() } else { title.trim().to_owned() };
+        let title = stology_core::document_title(&title).to_owned();
+        let commit = TITLE_COMMAND.with(|pending| pending.replace(0) != -1) && commit;
+        if let Some(canvas) = &mut self.diagram {
+            if commit { canvas.title = title; }
+            self.editing_new_title = false;
+            self.header.abortEditing();
+            self.update_header();
+            return true;
+        }
         let Some(doc) = self.document.clone() else {
             if commit { self.blank_title = title; }
             self.editing_new_title = false;
@@ -2508,6 +2772,7 @@ impl State {
                 }
                 document_tree::Event::Annotate(doc) => self.annotate_pptx(doc, false),
                 document_tree::Event::Reconvert(doc) => self.annotate_pptx(doc, true),
+                document_tree::Event::Delete(doc) => self.delete_document(doc),
                 document_tree::Event::Rename(doc) => self.begin_tree_rename(doc),
                 document_tree::Event::CommitRename(doc, title) => {
                     self.relocate_document(doc, None, Some(title))
@@ -2939,6 +3204,7 @@ impl State {
         }
     }
     unsafe fn save(&mut self) {
+        if self.diagram.is_some(){return}
         if !self.snapshot && self.document.as_ref().is_some_and(|d| d["kind"] == "pdf") {
             pdf_session::request_flush_all();
             self.poll_pdf_sessions();
@@ -3019,13 +3285,14 @@ impl State {
         if self.snapshot || self.editing_suggestion().is_some() {
             return;
         }
-        if !self.flush() {
-            self.fail("최신 입력을 보관하지 못했습니다. 삭제를 중단하고 편집 내용을 유지합니다.");
-            return;
+        if let Some(doc) = self.document.clone() { self.delete_document(doc); }
+    }
+    unsafe fn delete_document(&mut self, mut doc: Value) {
+        let current = self.document.as_ref().is_some_and(|open| open["id"] == doc["id"]);
+        if current {
+            if !self.flush() { return; }
+            if let Some(open) = &self.document { doc["version"] = open["version"].clone(); }
         }
-        let Some(doc) = self.document.clone() else {
-            return;
-        };
         let title = strv(&doc, "title");
         if !confirm(
             &format!(
@@ -3048,8 +3315,7 @@ impl State {
         match rpc(json!({"op":op,"id":doc["id"],"expected_version":doc["version"]})) {
             Ok(_) => {
                 pdf_session::forget(&strv(&doc, "id"));
-                self.dirty = false;
-                self.show_blank();
+                if current { self.dirty = false; self.show_blank(); }
                 self.refresh_right();
             }
             Err(e) => self.fail(&e),
@@ -4137,6 +4403,7 @@ impl State {
         self.hide_preview();
         self.document = Some(source.clone());
         self.snapshot = true;
+        self.current_evidence = Some(e.clone());
         self.dirty = false;
         let loc = &e["locator"];
         self.preview_locator = Some(loc.clone());
@@ -4217,6 +4484,7 @@ impl State {
                 | Action::Workspace(_)
                 | Action::NewWorkspace
                 | Action::DeleteWorkspace(..)
+                | Action::DeleteDocument(_)
                 | Action::Delete
                 | Action::ToggleMap
                 | Action::Suggest("edit", _)
@@ -4285,6 +4553,7 @@ impl State {
                 ) {
                     match rpc(json!({"op":"workspace.create","name":name})) {
                         Ok(w) => {
+                            self.remember_screen();
                             if self.map.is_some() {
                                 self.close_map();
                             }
@@ -4292,7 +4561,7 @@ impl State {
                             self.workspace = Some(strv(&w, "id"));
                             self.open_folders.clear();
                             self.document_tree = None;
-                            self.show_blank();
+                            self.restore_screen();
                             self.refresh();
                         }
                         Err(e) => self.fail(&e),
@@ -4324,6 +4593,7 @@ impl State {
                 if active && !self.flush() { return; }
                 match rpc(json!({"op":"workspace.delete","workspace_id":id})) {
                     Ok(_) => {
+                        self.screens.remove(&id);
                         if active {
                             self.chat.forget_workspace();
                             if self.map.is_some() { self.close_map(); }
@@ -4333,7 +4603,7 @@ impl State {
                             self.suggest_open = false;
                             self.open_folders.clear();
                             self.document_tree = None;
-                            self.show_blank();
+                            self.restore_screen();
                         }
                         self.refresh();
                     }
@@ -4341,29 +4611,19 @@ impl State {
                 }
             }
             Action::Workspace(id) => {
-                if !self.flush() {
-                    return;
-                }
-                let was_map_open = self.map.is_some();
-                if was_map_open {
-                    self.close_map();
-                }
+                if self.workspace.as_ref() == Some(&id) || !self.flush() { return; }
+                self.remember_screen();
+                if self.map.is_some() { self.close_map(); }
                 let _ = document_tree::drain();
                 organize_panel::close();
-                let changed = self.workspace.as_ref() != Some(&id);
-                if changed {
-                    self.suggest_open = false;
-                }
+                self.suggest_open = false;
                 self.workspace = Some(id);
                 self.open_folders.clear();
                 self.document_tree = None;
-                self.show_blank();
-                self.refresh_left_with_motion(changed);
+                self.restore_screen();
+                self.refresh_left_with_motion(true);
                 self.refresh_right();
                 self.update_header();
-                if was_map_open {
-                    self.open_map();
-                }
             }
             Action::AiSettings => ai_settings::open(),
             Action::Organize => {
@@ -4549,6 +4809,8 @@ impl State {
                     self.refresh_right();
                 }
             }
+            Action::Save if self.diagram.is_some()=>self.finish_diagram(),
+            Action::Delete if self.diagram.is_some()=>{self.discard_diagram();},
             Action::Save => {
                 if let Some(doc) = self.editing_suggestion().filter(|_| self.map.is_none()) {
                     self.dispatch_action(Action::Suggest("register", strv(doc, "id")));
@@ -4556,6 +4818,7 @@ impl State {
                     self.save();
                 }
             }
+            Action::DeleteDocument(doc) => self.delete_document(doc),
             Action::Delete => self.delete(),
             Action::Open(d) => {
                 self.open_doc(d);
@@ -4709,15 +4972,20 @@ impl State {
         }
         let title_command = TITLE_COMMAND.with(|c| c.replace(0));
         if self.editing_new_title {
-            if title_command == -1 {
-                self.finish_new_title(false);
-                self._window.makeFirstResponder(Some(&self.text));
-            } else if title_command == 1 {
-                if self.flush() {
-                    self._window.makeFirstResponder(Some(&self.text));
+            if title_command != 0 || self.header.currentEditor().is_none() {
+                let finished = if title_command == -1 || self.diagram.is_some() {
+                    self.finish_new_title(title_command != -1)
+                } else {
+                    self.flush()
+                };
+                if !finished { return; }
+                if title_command != 0 {
+                    if let Some(canvas) = &self.diagram {
+                        canvas.focus();
+                    } else {
+                        self._window.makeFirstResponder(Some(&self.text));
+                    }
                 }
-            } else if self.header.currentEditor().is_none() && !self.flush() {
-                return;
             }
         }
         self.handle_tree_events();
@@ -5073,6 +5341,13 @@ impl State {
         let right_inset = edge_inset * (1. - self.sidebar_openness[1]);
         self.editor_scroll
             .setFrame(rect(left_inset, f.origin.y, width - left_inset - right_inset, f.size.height));
+        let viewport_height = self.editor_scroll.contentSize().height;
+        self.text.setMinSize(NSSize::new(0., viewport_height));
+        let mut editor_size = self.text.frame().size;
+        if editor_size.height < viewport_height {
+            editor_size.height = viewport_height;
+            self.text.setFrameSize(editor_size);
+        }
         if let Some(p) = &self.preview {
             p.setFrame(f);
         }
@@ -5089,6 +5364,7 @@ impl State {
             r.setFrame(rect(270., height - 139., (width - 294.).min(166.), 28.));
         }
         self.update_analysis_help();
+        self.layout_diagram();
     }
     unsafe fn layout_right_tabs(&self, width: f64, height: f64) {
         // The tabs use the header width; collapse lives on the outer edge.
@@ -5342,6 +5618,14 @@ unsafe fn shortcut_icon(button: &NSButton, symbol: &str, label: &str) {
     button.setImagePosition(NSCellImagePosition::ImageOnly);
 }
 
+fn create_diagram_from_menu() {
+    STATE.with(|state| {
+        if let Some(app) = state.borrow_mut().as_mut() {
+            unsafe { app.start_diagram(None, true); }
+        }
+    });
+}
+
 fn main() {
     unsafe {
         font::register_bundled_fonts();
@@ -5469,6 +5753,7 @@ fn main() {
             subtitle,
             status,
             ai_spinner,
+            diagram: None,
             save_button: placeholder.clone(),
             delete_button: placeholder.clone(),
             map_button: placeholder,
@@ -5501,6 +5786,8 @@ fn main() {
             desc_hint: None,
             desc_concept: String::new(),
             desc_plain: String::new(),
+            screens: Default::default(),
+            current_evidence: None,
             map_preferences: std::collections::HashMap::new(),
             relation: None,
             cleanup_review: None,
@@ -5665,6 +5952,9 @@ fn main() {
         s.layout(root.bounds().size);
         s.update_header();
         s.probe_provider();
+        editor::set_diagram_opener(|link|STATE.with(|state|{
+            if let Ok(mut state)=state.try_borrow_mut(){if let Some(s)=state.as_mut(){s.start_diagram(Some(link), false);}}
+        }));
         editor::set_image_importer(import_image);
         STATE.with(|state| *state.borrow_mut() = Some(s));
         window.makeKeyAndOrderFront(None);

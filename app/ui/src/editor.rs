@@ -28,7 +28,9 @@ mod markdown_input;
 mod markdown_shortcuts;
 #[path = "smart_edit.rs"]
 mod smart_edit;
-pub use image_edit::set_image_importer;
+#[path = "diagram_paint.rs"]
+pub mod diagram_paint;
+pub use image_edit::{set_image_importer, set_diagram_opener};
 use image_edit::{ImageState, InlineImage};
 
 unsafe fn input_command(text: &NSTextView, command: markdown_input::Command) -> bool {
@@ -41,11 +43,14 @@ unsafe fn input_command(text: &NSTextView, command: markdown_input::Command) -> 
         return false;
     }
     let source = text.string().to_string();
-    let Some(edit) = markdown_input::command(
-        &source,
-        byte_for_utf16(&source, selection.location),
-        command,
-    ) else {
+    let at = byte_for_utf16(&source, selection.location);
+    let Some(edit) = markdown_input::command(&source, at, command).or_else(|| {
+        if command == markdown_input::Command::Backspace {
+            backspace_below_float(text, &source, at, selection)
+        } else {
+            None
+        }
+    }) else {
         return false;
     };
     let mut result = source.clone();
@@ -207,8 +212,12 @@ define_class!(
     }
 );
 
+include!("note_insert_menu.rs");
+
 #[derive(Default)]
 struct EditorState {
+    create_diagram: std::cell::Cell<Option<fn()>>,
+    selected_image: std::cell::Cell<Option<usize>>,
     pasting: std::cell::Cell<bool>,
     empty_text_selection: std::cell::Cell<Option<u64>>,
     base_directory: RefCell<Option<PathBuf>>,
@@ -216,6 +225,7 @@ struct EditorState {
     line_numbers: RefCell<Vec<(String, NSPoint)>>,
     list_labels: RefCell<Vec<(String, NSPoint, f64)>>,
     quote_bars: RefCell<Vec<NSRect>>,
+    image_drop_line: std::cell::Cell<Option<f64>>,
     rule_bars: RefCell<Vec<NSRect>>,
 }
 define_class!(
@@ -225,6 +235,11 @@ define_class!(
     #[ivars = EditorState]
     struct MarkdownEditor;
     impl MarkdownEditor {
+        #[unsafe(method(setString:))]
+        fn set_document_text(&self, value: &NSString) { unsafe {
+            self.ivars().selected_image.set(None);
+            let _: () = msg_send![super(self), setString:value];
+        }}
         #[unsafe(method(insertText:replacementRange:))]
         fn insert_text(&self, value: &AnyObject, range: NSRange) { unsafe {
             self.ivars().empty_text_selection.set(None);
@@ -311,6 +326,13 @@ define_class!(
         }}
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool { unsafe {
+            let flags = event.modifierFlags();
+            if event.keyCode() == 2 && flags.contains(NSEventModifierFlags::Command | NSEventModifierFlags::Shift)
+                && !flags.intersects(NSEventModifierFlags::Control | NSEventModifierFlags::Option)
+                && self.ivars().create_diagram.get().is_some() {
+                if let Some(create) = self.ivars().create_diagram.get() { create(); }
+                return true.into();
+            }
             if table_shortcut(self, event) || selection_shortcut(self, event) || formatting_shortcut(self, event) { true } else { msg_send![super(self), performKeyEquivalent:event] }
         }}
         #[unsafe(method(expandSelection:))]
@@ -333,10 +355,30 @@ define_class!(
             if !image_edit::paste(self) { let _: () = msg_send![super(self), paste:sender]; }
             self.ivars().pasting.set(false);
         }}
-        // Suppress AppKit's text context menu in the document editor.
         #[unsafe(method(menuForEvent:))]
-        fn menu_for_event(&self, _event: &NSEvent) -> *mut NSMenu {
-            std::ptr::null_mut()
+        fn menu_for_event(&self, _event: &NSEvent) -> *mut NSMenu { unsafe {
+            self.note_insert_menu().map_or(std::ptr::null_mut(), Retained::autorelease_return)
+        }}
+        #[unsafe(method(rightMouseDown:))]
+        fn note_right_mouse_down(&self, event: &NSEvent) { unsafe {
+            // NSTextView can select the word under a secondary click. Keep the writing caret.
+            if let Some(menu) = self.note_insert_menu() {
+                NSMenu::popUpContextMenu_withEvent_forView(&menu, event, self);
+            }
+        }}
+        #[unsafe(method(insertNoteCode:))]
+        fn insert_note_code(&self, _: Option<&AnyObject>) { unsafe {
+            let selection: NSRange = msg_send![self, selectedRange];
+            insert_note_block(self, selection, "```text\n\n```\n", "```text\n".len());
+        }}
+        #[unsafe(method(insertNoteTable:))]
+        fn insert_note_table(&self, _: Option<&AnyObject>) { unsafe {
+            let selection: NSRange = msg_send![self, selectedRange];
+            insert_note_block(self, selection, EMPTY_NOTE_TABLE, EMPTY_NOTE_TABLE.len());
+        }}
+        #[unsafe(method(createNoteDiagram:))]
+        fn create_note_diagram(&self, _: Option<&AnyObject>) {
+            if let Some(create) = self.ivars().create_diagram.get() { create(); }
         }
         #[unsafe(method(selectAll:))]
         fn select_all(&self, sender: Option<&AnyObject>) { unsafe {
@@ -358,6 +400,10 @@ define_class!(
         }}
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) { unsafe {
+            if matches!(event.keyCode(), 51 | 117)
+                && !event.modifierFlags().intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Option | NSEventModifierFlags::Control)
+                && image_edit::delete_selected_image(self) { return; }
+            image_edit::select_image(self, None);
             if table_shortcut(self, event) || selection_shortcut(self, event) || formatting_shortcut(self, event) { return; }
             if matches!(event.keyCode(), 36 | 76)
                 && event.modifierFlags().contains(NSEventModifierFlags::Shift)
@@ -394,7 +440,9 @@ define_class!(
         }}
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) { unsafe {
+            image_edit::select_image(self, None);
             self.ivars().empty_text_selection.set(None);
+            if self.place_block_caret(event) { return; }
             let _: () = msg_send![super(self), mouseDown:event];
             visible_line_start(self); skip_code_fence(self, false);
         }}
@@ -416,6 +464,10 @@ define_class!(
             NSColor::colorWithSRGBRed_green_blue_alpha(0.957, 0.961, 0.980, 1.0).setFill();
             for frame in self.ivars().code_panels.borrow().iter() {
                 NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(*frame, 10.0, 10.0).fill();
+            }
+            if let Some(y) = self.ivars().image_drop_line.get() {
+                NSColor::controlAccentColor().setFill();
+                NSBezierPath::bezierPathWithRect(NSRect::new(NSPoint::new(EDITOR_INSET, y), NSSize::new(self.bounds().size.width - 2. * EDITOR_INSET, 2.))).fill();
             }
             NSColor::separatorColor().setFill();
             for frame in self.ivars().rule_bars.borrow().iter() {
@@ -439,18 +491,21 @@ define_class!(
         }}
         #[unsafe(method(didChangeText))]
         fn did_change_text(&self) { unsafe {
+            self.ivars().selected_image.set(None);
             let _: () = msg_send![super(self), didChangeText];
             let base = self.ivars().base_directory.borrow().clone();
             style_with_base(self, base.as_deref());
         }}
         #[unsafe(method(deleteForward:))]
         fn delete_forward(&self, sender: Option<&AnyObject>) { unsafe {
+            if image_edit::delete_selected_image(self) { return; }
             let selection:NSRange=msg_send![self,selectedRange];
             if selection==NSRange::new(0,0) && self.ivars().empty_text_selection.get()==Some(fingerprint(&self.string().to_string())) {return;}
             let _: ()=msg_send![super(self),deleteForward:sender];
         }}
         #[unsafe(method(deleteBackward:))]
         fn delete_backward(&self, sender: Option<&AnyObject>) { unsafe {
+            if image_edit::delete_selected_image(self) { return; }
             if !input_command(self, markdown_input::Command::Backspace) && !heading_backspace(self) && !inline_backspace(self,inline_syntax) {
                 let _: () = msg_send![super(self), deleteBackward:sender];
             }
@@ -1388,6 +1443,18 @@ unsafe fn layout_fragment_rect(text: &NSTextView, index: usize) -> Option<NSRect
     ))
 }
 
+unsafe fn add_exclusion(text: &NSTextView, paths: &mut Vec<Retained<NSBezierPath>>, rect: NSRect) {
+    paths.push(NSBezierPath::bezierPathWithRect(rect));
+    if let Some(container) = text.textContainer() {
+        container.setExclusionPaths(&objc2_foundation::NSArray::from_retained_slice(paths));
+    }
+    if let Some(manager) = text.textLayoutManager() {
+        if let Some(content) = manager.textContentManager() {
+            manager.ensureLayoutForRange(&content.documentRange());
+        }
+    }
+}
+
 /// Apply live Markdown attributes only after the input method commits its text.
 /// Call when the string, selection, or document width changes.
 pub unsafe fn style(text: &NSTextView) {
@@ -1411,6 +1478,12 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
     if table_cell_is_editing(text) || image_edit::interacting() {
         return;
     }
+    render_markdown(text, base_directory, preview);
+}
+
+// The drag preview has its own text storage and can render while the live
+// editor holds its overlays stable for mouse tracking.
+unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, preview: Option<TableSizePreview>) {
     let marked: bool = msg_send![text, hasMarkedText];
     if marked {
         return;
@@ -1484,7 +1557,7 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
     }
     storage.addAttribute_value_range(NSFontAttributeName, &base, all);
     let paragraph = NSMutableParagraphStyle::new();
-    paragraph.setMinimumLineHeight(24.0);
+    paragraph.setMinimumLineHeight(NOTE_LINE_HEIGHT);
     storage.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, all);
     storage.addAttribute_value_range(NSKernAttributeName, &objc2_foundation::NSNumber::new_f64(0.2), all);
     storage.addAttribute_value_range(NSForegroundColorAttributeName, &ink, all);
@@ -1660,12 +1733,14 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
         // GFM needs a blank separator before prose. Reserve space for the
         // table and its controls, but don't draw that separator as a text row.
         if let Some(separator) = table.separator_line(&source) {
-            if text.isEditable() && separator.end == source.len() {
+            if text.isEditable() && separator.end == source.len() && !table.wraps(text, handle_room) {
                 terminal_separator = Some((table, utf16_range(&source, separator.clone()).location));
             }
             conceal(&storage, utf16_range(&source, separator), true);
         }
-        style_table_anchor(&storage, &source, table, handle_room, 0.0);
+        if !table.wraps(text, handle_room) {
+            style_table_anchor(&storage, &source, table, handle_room, 0.0);
+        }
     }
     storage.endEditing();
     // Never inherit transparent/tiny attributes from a concealed syntax run.
@@ -1749,7 +1824,23 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
     }
     let mut image_frames: Vec<Option<NSRect>> = Vec::new();
     let mut exclusions = Vec::new();
-    for spec in &image_specs {
+    // Install floating obstacles in source order. Each exclusion can reflow
+    // the anchors of the images and tables that follow it.
+    let mut floating_tables = tables.iter().filter(|t| t.wraps(text, handle_room)).peekable();
+    for next_image in image_specs.iter().map(Some).chain(std::iter::once(None)) {
+        while let Some(&table) = floating_tables.peek() {
+            if next_image.is_some_and(|image| image.link.bytes.start < table.bytes.start) { break; }
+            floating_tables.next();
+            if let Some(anchor) = layout_fragment_rect(text, table.anchor(&source).location) {
+                let width = table.widths(text, handle_room).iter().sum::<f64>() + handle_room;
+                let frame = NSRect::new(
+                    NSPoint::new(0., anchor.origin.y - text.textContainerOrigin().y + TABLE_TOP_PADDING),
+                    NSSize::new(width + LINE_PADDING, table.height() + handle_room),
+                );
+                add_exclusion(text, &mut exclusions, frame);
+            }
+        }
+        let Some(spec) = next_image else { break };
         let Some(local) = layout_fragment_rect(text, spec.range.location) else {
             image_frames.push(None);
             continue;
@@ -1757,7 +1848,7 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
         let available =
             (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0 - spec.size.width).max(0.0);
         let mut frame = NSRect::new(
-            NSPoint::new(EDITOR_INSET + available * spec.link.x, local.origin.y + 6.0),
+            NSPoint::new(EDITOR_INSET + available * spec.link.x, (local.origin.y + 6.0 + spec.link.y).max(text.textContainerOrigin().y)),
             spec.size,
         );
         // A later image anchor clears an earlier image when their rectangles overlap.
@@ -1767,6 +1858,7 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             .filter(|previous| {
                 frame.origin.x < previous.origin.x + previous.size.width
                     && previous.origin.x < frame.origin.x + frame.size.width
+                    && previous.origin.y < frame.origin.y + frame.size.height + 12.0
                     && frame.origin.y < previous.origin.y + previous.size.height + 12.0
             })
             .map(|r| r.origin.y + r.size.height + 12.0)
@@ -1794,7 +1886,7 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 }
             }
             if let Some(local) = layout_fragment_rect(text, spec.range.location) {
-                frame.origin.y = local.origin.y + 6.0;
+                frame.origin.y = local.origin.y + 6.0 + spec.link.y;
             }
             frame.origin.y = frame.origin.y.max(bottom);
         }
@@ -1816,17 +1908,7 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 NSPoint::new(left, frame.origin.y - origin.y),
                 NSSize::new(right - left, frame.size.height + 8.0),
             );
-            exclusions.push(NSBezierPath::bezierPathWithRect(rect));
-            if let Some(container) = text.textContainer() {
-                container.setExclusionPaths(&objc2_foundation::NSArray::from_retained_slice(
-                    &exclusions,
-                ));
-            }
-            if let Some(manager) = text.textLayoutManager() {
-                if let Some(content) = manager.textContentManager() {
-                    manager.ensureLayoutForRange(&content.documentRange());
-                }
-            }
+            add_exclusion(text, &mut exclusions, rect);
         }
     }
     if text.window().is_some() {
@@ -1842,11 +1924,18 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                     .length
                     .saturating_sub(1);
             let bottom = layout_fragment_rect(text, bottom_index).unwrap_or(top);
+            // A terminal closing fence and the extra editable EOF line share
+            // one layout fragment. Keep the following caret outside the panel.
+            let footer_height = if !code.close.is_empty() {
+                layout_fragment(text, bottom_index)
+                    .and_then(|f| f.textLineFragments().firstObject())
+                    .map_or(bottom.size.height, |line| line.typographicBounds().size.height)
+            } else { bottom.size.height };
             let panel = NSRect::new(
                 NSPoint::new(EDITOR_INSET, top.origin.y),
                 NSSize::new(
                     (text.bounds().size.width - 2.0 * EDITOR_INSET).max(80.0),
-                    bottom.origin.y + bottom.size.height - top.origin.y,
+                    bottom.origin.y + footer_height - top.origin.y,
                 ),
             );
             if let Some(native) = native {
@@ -1967,13 +2056,7 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             let Some(local) = layout_fragment_rect(text, table.anchor(&source).location) else {
                 continue;
             };
-            let columns = table.rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
-            // 열은 고정 너비로 늘어나고, 본문 폭을 넘으면 그 안에서 고르게 나눈다.
-            let available = (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0).max(80.0) - handle_room;
-            let cell_width = TABLE_COLUMN_WIDTH.min(available / columns as f64);
-            let mut widths: Vec<_> = (0..columns).map(|c| table.column_width(c, cell_width)).collect();
-            let scale = (available / widths.iter().sum::<f64>()).min(1.);
-            for width in &mut widths { *width *= scale; }
+            let widths = table.widths(text, handle_room);
             let grid_width = widths.iter().sum::<f64>();
             let width = grid_width + handle_room;
             let frame = NSRect::new(
@@ -2066,20 +2149,28 @@ unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 continue;
             };
             let allocated = InlineImage::alloc(mtm).set_ivars(ImageState {
+                selected: Default::default(),
                 text: Weak::new(text),
                 range: spec.range,
                 base: base_directory.map(Path::to_path_buf),
                 link: spec.link,
                 fingerprint: fingerprint(&source),
+                targets: Default::default(),
+                preview: Default::default(),
                 drag: std::cell::Cell::new(None),
             });
             let image_view: Retained<InlineImage> = msg_send![super(allocated),initWithFrame:frame];
             image_view.setImage(Some(&spec.image));
             image_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
-            image_view.setAccessibilityLabel(Some(&NSString::from_str(
-                "노트 이미지 · 모서리와 가장자리로 크기 조절 · 우클릭으로 삭제",
-            )));
+            let image_label = if image_view.diagram_link().is_some() {
+                let name = spec.image.accessibilityDescription().map(|s| s.to_string()).unwrap_or_default();
+                format!("다이어그램 {name} · 모서리와 가장자리로 크기 조절 · 우클릭으로 편집 또는 삭제")
+            } else {
+                "노트 이미지 · 모서리와 가장자리로 크기 조절 · 우클릭으로 삭제".to_owned()
+            };
+            image_view.setAccessibilityLabel(Some(&NSString::from_str(&image_label)));
             text.addSubview(&image_view);
+            image_view.sync_selection();
             // A floating image at the end of a short note must remain scrollable.
             if frame.origin.y + frame.size.height + 30.0 > text.frame().size.height {
                 let mut size = text.frame().size;
@@ -2405,6 +2496,7 @@ define_class!(
 
 include!("table_controls.rs");
 include!("table_grid.rs");
+include!("block_caret.rs");
 
 const TABLE_COLUMN_WIDTH: f64 = 140.0;
 
@@ -2451,6 +2543,22 @@ struct InlineTableSpec {
     cell_ranges: Vec<Vec<Range<usize>>>,
 }
 impl InlineTableSpec {
+    fn widths(&self, text: &NSTextView, handle_room: f64) -> Vec<f64> {
+        let columns = self.rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
+        let available = (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0).max(80.0) - handle_room;
+        let cell_width = TABLE_COLUMN_WIDTH.min(available / columns as f64);
+        let mut widths: Vec<_> = (0..columns).map(|c| self.column_width(c, cell_width)).collect();
+        let scale = (available / widths.iter().sum::<f64>()).min(1.);
+        for width in &mut widths { *width *= scale; }
+        widths
+    }
+
+    fn wraps(&self, text: &NSTextView, handle_room: f64) -> bool {
+        self.layout["wrap"].as_bool() == Some(true)
+            && self.widths(text, handle_room).iter().sum::<f64>() + handle_room + LINE_PADDING * 2.
+                < text.bounds().size.width - EDITOR_INSET * 2.
+    }
+
     fn height(&self) -> f64 {
         (0..self.rows.len()).map(|r| self.row_height(r)).sum()
     }
@@ -2461,13 +2569,14 @@ impl InlineTableSpec {
     }
 
     fn separator_line(&self, source: &str) -> Option<Range<usize>> {
-        let start = self.bytes.end;
-        let line = source[start..].split_inclusive('\n').next()?;
-        (source[..start].ends_with('\n')
-            && line.ends_with('\n')
-            && line.trim_matches([' ', '\t', '\r', '\n']).is_empty())
-        .then_some(start..start + line.len())
+        table_separator(source, self.bytes.end)
     }
+}
+
+fn table_separator(source: &str, start: usize) -> Option<Range<usize>> {
+    let line = source[start..].split_inclusive('\n').next()?;
+    (source[..start].ends_with('\n') && line.ends_with('\n') && line.trim_matches([' ', '\t', '\r', '\n']).is_empty())
+        .then_some(start..start + line.len())
 }
 const TABLE_TOP_PADDING: f64 = 6.0;
 const TABLE_HANDLE_SIZE: f64 = 22.0;
@@ -3032,4 +3141,23 @@ mod tests {
             assert!(r.length > 0);
         }
     }
+}
+
+pub unsafe fn insert_diagram(
+    text: &NSTextView,
+    selection: NSRange,
+    on_caret_line: bool,
+    destination: &str,
+    base: &Path,
+    width: f64,
+) {
+    if on_caret_line {
+        if let Some(editor) = text.downcast_ref::<MarkdownEditor>() {
+            *editor.ivars().base_directory.borrow_mut() = Some(base.to_owned());
+        }
+        let markup = image_edit::attachment_markup("다이어그램", destination, width);
+        insert_note_block(text, selection, &markup, markup.len());
+        return;
+    }
+    image_edit::insert_attachment(text,NSRange::new(selection.location,0),"다이어그램",destination,base,width);
 }

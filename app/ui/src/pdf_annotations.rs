@@ -1,7 +1,7 @@
 //! Editable PDF annotations. The PDF stores both standard appearance and the
 //! small editing model; unknown annotations are never replaced.
 #[path = "pdf_annotation_tooltip.rs"]
-mod tooltip;
+pub(crate) mod tooltip;
 use objc2::{
     class, define_class, msg_send,
     rc::{Allocated, Retained, Weak},

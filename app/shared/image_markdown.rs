@@ -10,10 +10,15 @@ pub struct ImageLink {
     pub alt: String,
     pub width: Option<f64>,
     pub x: f64,
+    pub y: f64,
     pub wrap: bool,
 }
 impl ImageLink {
     pub fn markdown(&self, destination: &str, width: f64, x: f64, wrap: bool) -> String {
+        self.markdown_at(destination, width, x, wrap, self.y)
+    }
+    pub fn markdown_at(&self, destination: &str, width: f64, x: f64, wrap: bool, y: f64) -> String {
+        let vertical = if y.abs() >= 0.5 { format!(";y={y:.0}") } else { String::new() };
         let title = self.title.split("stology:").next().unwrap_or("").trim();
         let title = if title.is_empty() {
             String::new()
@@ -21,7 +26,7 @@ impl ImageLink {
             format!("{} ", title.replace('"', "&quot;"))
         };
         format!(
-            "![{}](<{}> \"{}stology:width={:.0};x={:.3};wrap={}\")",
+            "![{}](<{}> \"{}stology:width={:.0};x={:.3};wrap={}{vertical}\")",
             self.alt.replace(']', "\\]"),
             destination,
             title,
@@ -52,6 +57,7 @@ pub fn images(source: &str) -> Vec<ImageLink> {
                 title: title.into_string(),
                 width: None,
                 x: 0.0,
+                y: 0.0,
                 wrap: false,
             };
             if let Some((_, metadata)) = image.title.split_once("stology:") {
@@ -73,6 +79,7 @@ pub fn images(source: &str) -> Vec<ImageLink> {
                                     .unwrap_or(0.0)
                                     .clamp(0.0, 1.0)
                             }
+                            "y" => image.y = value.parse::<f64>().ok().filter(|v| v.is_finite()).unwrap_or(0.).clamp(-1_000_000., 1_000_000.),
                             "wrap" => image.wrap = value == "1",
                             _ => (),
                         }
@@ -83,6 +90,12 @@ pub fn images(source: &str) -> Vec<ImageLink> {
         })
         .collect()
 }
+pub fn diagram_filename(file: &str) -> bool {
+    let Some(id) = file.strip_suffix(".svg") else { return false };
+    id.len() == 36 && id.bytes().enumerate().all(|(i,b)| {
+        if matches!(i,8|13|18|23) { b == b'-' } else { b.is_ascii_hexdigit() }
+    })
+}
 /// Rebase only app-owned image links. Never touch code, remote links or prose.
 pub fn rebase(source: &str, old_folder: &str, new_folder: &str) -> String {
     let old_depth = old_folder.split('/').filter(|s| !s.is_empty()).count();
@@ -91,7 +104,7 @@ pub fn rebase(source: &str, old_folder: &str, new_folder: &str) -> String {
     let mut result = source.to_owned();
     for image in images(source).into_iter().rev() {
         // Preserve legacy links while rebasing new hidden attachments too.
-        let Some((directory, file)) = [".images", "이미지"].iter().find_map(|directory| {
+        let Some((directory, file)) = [".images", "이미지", ".diagram"].iter().find_map(|directory| {
             image.destination.strip_prefix(&format!("{old_parent}{directory}/"))
                 .map(|file| (*directory, file))
         }) else {
@@ -100,7 +113,9 @@ pub fn rebase(source: &str, old_folder: &str, new_folder: &str) -> String {
         let Some((hash, ext)) = file.rsplit_once('.') else {
             continue;
         };
-        if hash.len() != 64
+        if directory == ".diagram" {
+            if !diagram_filename(file) { continue; }
+        } else if hash.len() != 64
             || !hash.bytes().all(|b| b.is_ascii_hexdigit())
             || !matches!(ext, "png" | "jpg" | "jpeg")
         {
