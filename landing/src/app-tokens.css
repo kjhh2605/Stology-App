@@ -1,0 +1,45 @@
+/* 실제 앱의 밝은 테마 값. 출처: app/ui/src/theme.rs (color(r,g,b,a) sRGB), font.rs (SUIT).
+   랜딩의 어두운 페이지 토큰(style.css :root)과 분리해 앱을 재현하는 프레임 안에서만 쓴다. */
+:root{
+  /* theme::canvas 그라데이션 */
+  --app-canvas-a:#e6ebfb;
+  --app-canvas-b:#f6f8fe;
+  --app-canvas-c:#e0e8f7;
+  /* theme::panel 라벤더 유리(바탕 위 합성값) */
+  --app-glass:rgba(226,227,251,.78);
+  --app-glass-strong:rgba(236,236,253,.92);
+  --app-glass-shadow:0 5px 18px rgba(38,46,92,.075);
+  /* theme::document 카드 */
+  --app-card:#ffffff;
+  --app-card-border:rgba(191,201,227,.6);
+  --app-radius:22px;
+  /* 글자 */
+  --app-ink:#1d1e30;
+  --app-ink-soft:#3c3f55;
+  --app-muted:#7d7f98;
+  --app-faint:#a0a2b8;
+  /* theme::indigo, Glass::Selected, document_selection_color */
+  --app-indigo:#4f46e5;
+  --app-indigo-soft:rgba(99,101,242,.16);
+  --app-selected-ink:#423ac7;
+  --app-selection:rgba(107,97,250,.12);
+  --app-row-selected:rgba(255,255,255,.55);
+  --app-row-border:rgba(99,91,255,.35);
+  /* 상태 */
+  --app-green:#34c759;
+  --app-gray-dot:#a3a6b8;
+  /* 파일 종류(file_type_tint) */
+  --app-file-pdf:#a8333d;
+  --app-file-slides:#9e4d17;
+  --app-file-image:#1a6b6b;
+  --app-file-note:#5c6185;
+  /* PDF 필기 색(랜딩 기준 이미지 pdf-overview.jpg) */
+  --app-highlight:#ffe266;
+  --app-pen:#2d5bd7;
+  --app-note-ink:#2d5bd7;
+  /* 코드·인용 */
+  --app-code-bg:#eef0fa;
+  --app-quote-bar:#c7c4ef;
+  --app-font:SUIT,-apple-system,sans-serif;
+  --app-mono:'SFMono-Regular',Menlo,Consolas,monospace;
+}

@@ -1,47 +1,16 @@
 # 랜딩사이트 이미지 자료
 
-현재 기능 소개는 `landing/src/catalog.js`의 노트 16개·PDF 13개에 대응하는 실제 Mac 앱 녹화 영상을 사용한다. 왼쪽 목록에서 기능을 선택하면 해당 영상이 음소거 상태로 자동 반복된다. 재생·일시정지·탐색·전체 화면 등의 영상 조작 버튼과 자막은 제공하지 않는다. 완성된 자산의 개수·길이·규격·해시는 [manifest](manifest.json)에서 확인한다.
+현재 기능 소개는 영상 파일을 쓰지 않는다. 노트 16개·PDF 13개 장면은 실제 앱 UI를 재현한 DOM/CSS 장면을 브라우저에서 바로 그린다(`landing/src/scenes/`). 이 폴더에는 실제 앱 화면 이미지와 히어로 자산만 남는다.
 
-## 녹화·인코딩
+| 파일 | 용도 | 출처 |
+|---|---|---|
+| `app-overview.jpg` | 앱 창 전체의 기준 이미지. DOM 재현의 대조용 | 2026-11-17 시험용 Stology 캡처 |
+| `pdf-overview.jpg` | PDF 필기 화면의 기준 이미지. 도구 막대 순서·필기 색의 출처 | 2026-11-17 시험용 Stology 캡처 |
+| `map-overview.jpg` | 06 과목 지도 섹션의 실제 화면 | [2026-11-18 과목 정리 검증](../../../app/qa/runs/subject-ontology-2026-11-18/map-claude-workspace.jpeg) 사본. 데이터베이스 과목 시험 자료 |
+| `map-graph-crop.jpg` | 지도 검색창 장면의 배경(지도 영역만 잘라 냄, 515×505) | 위 이미지에서 `sips`로 잘라 냄 |
+| `hero/star.webp`, `hero/star-sheet.webp` | 라벤더 별 캐릭터 스프라이트 | Blender 원본 렌더([스크립트](../../scripts/render-star-sprites.py)) |
+| `psychology-demo.pdf` | 시연 자료 원본(심리학의 이해) | 직접 작성 |
 
-촬영 앱은 설치된 Stology Local을 복사한 별도 Stology Capture 번들이다. 시험 데이터 디렉터리를 지정해 개인 문서·대화·계정을 사용하지 않는다. 교양 수업 ‘심리학의 이해’의 기억·학습 내용을 새로 작성해 Aside로 앱을 조작하고 macOS 화면 녹화로 실제 변화를 담았다. 녹화 화면의 텍스트·서식·PDF 필기를 합성하거나 모션그래픽으로 대체하지 않는다.
+## 이전 녹화 자산 (이력)
 
-[인코더](../../scripts/encode-recordings.py)는 완성 표시가 있는 원본만 읽어 `demos/<id>.mp4`와 `demos/<id>.jpg`를 만든다. MP4는 H.264·1280×800·yuv420p·faststart이며 영상 스트림만 포함한다. 오디오·자막 스트림을 넣지 않으며 화면 위에 자막을 합성하지 않는다. 노트는 서식 변화를 읽기 쉽도록 실제 중앙 편집 영역을 자르고, PDF 필기는 도구·작업 영역·자료 목록 일부를 함께 보여 주도록 자르고 공유·변환·분석은 전체 창을 유지한다. 원본의 재생 속도는 유지한다. PDF 공유는 앞의 대기 5초를 제거했다. PDF 분석은 원본의 0–3초, 10.5–13.5초, 21.5초–끝을 잇고 동일한 실제 분석 작업의 완료 화면 마지막 3초를 붙였다. 처리 대기만 줄인 편집이며 별개의 결과를 합성하지 않았다. 편집 구간은 manifest의 `edit`에 남긴다.
-
-원본과 임시 촬영 자료는 저장소 밖의 `/tmp/stology-landing-capture/`에 둔다. `passive/<id>.mov`를 기록한 뒤 녹화 성공·내용을 확인하고 같은 이름의 `.ready` 파일을 생성한다. 저장소 루트에서 다음 명령을 실행하면 준비된 영상만 인코딩한다. 이전에 검토한 굵게·체크리스트·선택 확장·강조·텍스트 메모·펜 원본 6개도 재사용하려면 `--legacy`를 추가한다.
-
-```sh
-python3 landing/scripts/encode-recordings.py --legacy
-```
-
-출력은 임시 파일을 완성한 뒤 교체한다. 원본 크기가 바뀌었거나 알려진 촬영 규격이 아니면 임의로 잘라내지 않고 실패를 보고한다. 인코딩 메타 정보와 전후 6컷 접촉 시트는 `/tmp/stology-landing-capture/passive-qa/`에 기록한다.
-
-## 히어로 자산
-
-`hero/`와 `../mark.png`는 촬영물이 아니라 저장소의 원본에서 스크립트로 만든다.
-
-| 파일 | 내용 |
-| --- | --- |
-| `../mark.png` | 앱 아이콘 `app/assets/StologyLocal.png`에서 분리한 S 리본을 192px 정사각으로 줄인 마크·파비콘(투명 배경). 색과 음영은 원본 그대로이며 가장자리 알파만 계산했다. |
-| `hero/star-sheet.webp` | 라벤더 별 스프라이트 시트(2048×2048, 8열·256px 칸). 0–47번은 7.5° 간격 한 바퀴, 48–62번은 정면 ±52.5°의 눈 감은 프레임 |
-| `hero/star.webp` | 시트 3번 프레임(22.5°)의 단일 이미지. 마무리 섹션에 사용 |
-
-히어로의 은하수는 이미지 자산 없이 `src/hero-scene.js`가 그린다. 이전 히어로가 쓰던 `hero/s-ribbon.webp`는 삭제했다.
-
-```sh
-python3 landing/scripts/extract-icon-s.py app/assets/StologyLocal.png landing/public
-blender -b <lavender-star.blend> --python landing/scripts/render-star-sprites.py -- /tmp/stology-star-frames
-python3 landing/scripts/build-star-sheet.py /tmp/stology-star-frames landing/public/media/hero
-```
-
-분리·시트 스크립트는 numpy·pillow·scipy가 필요하다. 별 원본은 `kjhh2605/3d` 워크트리의 `app/assets/helpers/concepts/lavender-star-turnaround-v5/lavender-star.blend`이며 2026-11-22 Blender 5.2.3 Cycles(512px·128샘플·디노이즈)로 렌더했다. 원본의 조명·재질·정면 직교 카메라를 그대로 두고 배경만 투명으로 바꿨으며 원본 파일은 저장하지 않았다. Metal 셰이더 캐시 단계에서 Blender가 중단되면 같은 명령 뒤에 빠진 파일명(`open-45.png` 등)을 덧붙여 그 프레임만 다시 렌더한다. 시트 칸 규격은 `src/hero-scene.js`의 `SHEET` 상수와 같아야 한다.
-
-## 보조 자료
-
-| 파일 | 내용 |
-| --- | --- |
-| `app-overview.jpg` | 개인 자료가 없는 시험용 Stology의 심리학 수업 노트 화면 |
-| `pdf-overview.jpg` | 같은 시험 자료의 PDF 필기 화면 |
-| `psychology-demo.pdf` | 시연용으로 새로 작성한 ‘심리학의 이해’ 1페이지 교양 자료 |
-
-이미지는 실제 Mac 앱을 Aside로 캡처했다. 시험용 데이터 경로를 분리했으며 개인 문서·대화·계정을 포함하지 않는다. 시연용 PDF는 SUIT 글꼴을 사용했다. [최초 녹화 버전 검증](../../../app/qa/runs/landing-site-2026-11-17.md)과 [중간 모션그래픽 버전 검증](../../../app/qa/runs/landing-motion-2026-11-17.md)은 당시 버전의 이력이다.
+2026-11-17~22의 랜딩은 `demos/<id>.mp4`·`.jpg` 29쌍의 실제 앱 녹화를 자동 반복 재생했다([ADR-025](../../../decisions/2026-11-17/ADR-025-passive-native-demos.md)). 2026-11-23 재구축에서 사용자의 요청에 따라 전부 DOM 장면으로 바꾸면서 녹화 파일, `manifest.json`, 인코더 `encode-recordings.py`를 저장소에서 제거했다. 필요하면 Git 이력(2026-11-23 이전 커밋)에서 꺼낼 수 있다. 녹화 방식과 편집 구간 기록은 그 시점의 이 문서에 있다.

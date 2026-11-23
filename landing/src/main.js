@@ -1,53 +1,126 @@
 import './style.css';
-import copy from './copy.json';
+import './sections.css';
+import './app-ui.css';
+import ko from './i18n/ko.js';
+import en from './i18n/en.js';
 import { initHeroScene } from './hero-scene.js';
-import {shortcuts,pdfTools,shortcutNotes,shortcutLimits,pdfNotes,pdfLimits} from './catalog.js';
-import {createExplorerMarkup as demoSection,mountExplorer} from './feature-explorer.js';
+import { noteItems, pdfItems } from './catalog.js';
+import { createExplorerMarkup, mountExplorer } from './feature-explorer.js';
+import { createPlayer } from './scenes/runtime.js';
+import { windowLoop } from './scenes/window-loop.js';
+import { noteScenes } from './scenes/note-scenes.js';
+import { pdfScenes } from './scenes/pdf-scenes.js';
+import { initAnalytics, bindTracking, track } from './analytics.js';
+import { DOWNLOAD_URL, DOWNLOAD_VERSION, RELEASES_URL, DISCORD_URL } from './config.js';
 
-// 버전을 올릴 때 app/scripts/release.sh가 만든 GitHub 릴리스 주소로 바꾼다.
-const DOWNLOAD_VERSION = '0.1.0';
-const DOWNLOAD_URL = `https://github.com/kjhh2605/Stology-App/releases/download/v${DOWNLOAD_VERSION}/Stology-Local-${DOWNLOAD_VERSION}-arm64.dmg`;
+const lang = document.documentElement.lang === 'en' ? 'en' : 'ko';
+const S = lang === 'en' ? en : ko;
+initAnalytics();
+
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const downloadIcon = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14" stroke="currentColor" stroke-width="1.5"/></svg>';
-const arrow = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="1.5"/></svg>';
+const discordIcon = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19.6 5.6A17 17 0 0 0 15.4 4l-.5 1a15.7 15.7 0 0 0-5.8 0l-.5-1a17 17 0 0 0-4.2 1.6C1.7 9.6 1 13.5 1.3 17.3A17.3 17.3 0 0 0 6.5 20l1.1-1.7c-.6-.2-1.2-.5-1.7-.8l.4-.3a12.3 12.3 0 0 0 11.4 0l.4.3c-.5.3-1.1.6-1.7.8l1.1 1.7a17.2 17.2 0 0 0 5.2-2.7c.4-4.4-.7-8.3-3.1-11.7zM8.7 15c-1 0-1.9-1-1.9-2.1s.8-2.2 1.9-2.2 1.9 1 1.9 2.2S9.8 15 8.7 15zm6.6 0c-1 0-1.9-1-1.9-2.1s.8-2.2 1.9-2.2 1.9 1 1.9 2.2-.8 2.1-1.9 2.1z"/></svg>';
 const icon = (name) => {
- const paths={note:'M6 3h9l4 4v14H6z M14 3v5h5 M9 12h7 M9 16h5',map:'M6 6l12 3-6 10L6 6 M6 6l6 13 M6 6h.01 M18 9h.01',ai:'M4 5h16v12H9l-5 4V5z M8 10h8 M8 13h5',shield:'M12 3l8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3z M8 12l3 3 5-6',pen:'M4 20l4-1L20 7l-4-4L4 15v5z M13 6l5 5',plus:'M12 5v14 M5 12h14',check:'M5 12l4 4L19 6',selection:'M4 8V4h4 M16 4h4v4 M20 16v4h-4 M8 20H4v-4 M8 9h8 M8 13h6'};
- return `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="${paths[name]||paths.note}" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const paths = {
+    note: 'M6 3h9l4 4v14H6z M14 3v5h5 M9 12h7 M9 16h5',
+    account: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M4 21a8 8 0 0 1 16 0 M17 7l2 2 3-3',
+    files: 'M7 3h7l4 4v4 M7 3v14h5 M14 3v4h4 M13 13h8v8h-8z M16 17h2',
+    shield: 'M12 3l8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3z M8 12l3 3 5-6',
+    map: 'M6 6l12 3-6 10L6 6 M6 6l6 13 M6 6h.01 M18 9h.01',
+    spark: 'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z M5 17l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z',
+  };
+  return `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="${paths[name] || paths.note}" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 };
-const esc = value => String(value).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const notesMarkup = (notes, limits) => !notes.length && !limits.length ? '' : `<details class="coverage-notes"><summary>사용할 때 알아두면 좋은 점</summary><ul>${[...notes,...limits].map(item=>`<li><strong>${esc(item.title)}</strong> — ${esc(item.body)}</li>`).join('')}</ul></details>`;
-document.querySelector('#app').innerHTML=`
-<a class="skip-link" href="#main">본문으로 이동</a>
-<header class="site-header"><div class="header-inner"><a class="brand" href="#" aria-label="Stology 처음으로"><img src="/mark.png" alt="" width="30" height="30"><span>stology<span class="brand-dot">.</span></span></a><nav aria-label="주요 메뉴"><a href="#workspace">학습 공간</a><a href="#shortcuts">노트 단축키</a><a href="#pdf">PDF 필기</a></nav><a class="environment-link" href="${DOWNLOAD_URL}" download>Mac용 다운로드 ${downloadIcon}</a></div></header>
-<main id="main">
-<div class="hero-stage"><canvas id="hero-scene" role="img" aria-label="Stology의 S 모양으로 모여 흐르는 은하수 위에서 라벤더 별 캐릭터 하나가 흐름을 타고, 뛰어오르고, 주변을 날아다니는 애니메이션"></canvas><section class="hero container" aria-labelledby="hero-title">
- <div class="hero-copy"><div class="eyebrow"><span class="status-light"></span> 나의 배움을 연결하는 공간 <span class="eyebrow-line"></span></div><h1 id="hero-title">${copy.heroTitle}<br><span>${copy.heroAccent}</span></h1><p class="hero-description">${copy.heroBody}</p><div class="hero-actions"><a class="button button-primary" href="${DOWNLOAD_URL}" download>Mac용 다운로드 ${downloadIcon}</a><a class="text-link" href="#shortcuts">어떻게 쓰는지 보기 <span>↘</span></a></div><div class="hero-platform"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="3" width="16" height="12" rx="2" stroke="currentColor"/><path d="M12 15v5m-5 0h10" stroke="currentColor"/></svg> Apple Silicon Mac · macOS 14 이상 <i></i> 버전 ${DOWNLOAD_VERSION} 미리보기</div></div>
- <div class="hero-art"><div class="art-label label-top"><span class="tiny-cross">+</span> 기록이 모이고</div><div class="art-label label-bottom"><span class="tiny-cross">+</span> 이해가 연결되는 곳</div><div class="art-coordinate">STOLOGY / CONNECTED LEARNING</div><button class="motion-toggle" aria-label="메인 애니메이션 일시정지" aria-pressed="false">Ⅱ</button></div>
- <div class="hero-bottom"><span>한 과목 안에서 이어지는 공부</span><div><span>노트</span><b>+</b><span>PDF 필기</span><b>+</b><span>지식지도</span><b>+</b><span>학습도우미</span></div><a href="#workspace" aria-label="학습 공간으로 스크롤">↓</a></div>
-</section></div>
-<section id="workspace" class="workspace section container"><div class="section-heading reveal"><div><p class="section-index">01 <span>/</span> 나만의 학습 공간</p><h2>${copy.workspaceTitle}</h2></div><p>${copy.workspaceBody}</p></div>
- <div class="workspace-preview reveal"><div class="preview-label"><span class="status-light"></span> STOLOGY FOR MAC <span>심리학의 이해 · 수업 노트</span></div><img src="/media/app-overview.jpg" alt="Stology 실제 앱에서 심리학의 이해 과목의 기억과 학습 노트를 편집하는 화면" width="1440" height="900" loading="lazy"><div class="preview-footnote"><span>자료를 읽는 곳. 생각을 적는 곳. 모두 여기에.</span><span>실제 Mac 앱 화면 ↗</span></div></div>
- <div class="feature-strip reveal">${[['note',copy.noteTitle,copy.noteBody],['map',copy.mapTitle,copy.mapBody],['ai',copy.aiTitle,copy.aiBody]].map(([i,t,b],n)=>`<article><span class="feature-icon">${icon(i)}</span><span class="feature-number">0${n+1}</span><h3>${t}</h3><p>${b}</p></article>`).join('')}</div>
-</section>
-<section id="shortcuts" class="section demo-section container"><div class="section-heading reveal"><div><p class="section-index">02 <span>/</span> 손에 익는 노트</p><h2>${copy.shortcutTitle}</h2></div><p>${copy.shortcutBody}</p></div>${demoSection('shortcuts',shortcuts)}${notesMarkup(shortcutNotes,shortcutLimits)}</section>
-<section id="pdf" class="pdf-section"><div class="container section"><div class="section-heading reveal"><div><p class="section-index">03 <span>/</span> 읽으면서 남기는 PDF 필기</p><h2>${copy.pdfTitle}</h2></div><p>${copy.pdfBody}</p></div>${demoSection('pdf',pdfTools)}${notesMarkup(pdfNotes,pdfLimits)}<div class="pdf-note">${icon('note')}<p>필기는 작업 PDF에 저장돼요. 강의자료를 다시 열어도 표시와 메모를 함께 볼 수 있습니다.</p><span>읽기 → 표시하기 → 다시 보기</span></div></div></section>
-<section class="local-section container reveal"><div class="local-emblem">${icon('shield')}</div><div><p class="section-index">내 자료를 다루는 방식</p><h2>${copy.localTitle}</h2><p>${copy.localBody}</p></div><div class="local-meta"><span><i></i> 내 Mac에 파일 보관</span><span><i></i> 직접 선택하는 AI 분석</span></div></section>
-<section class="faq-section container section"><div><p class="section-index">04 <span>/</span> 시작하기 전에</p><h2>궁금한 점이<br>남아 있나요?</h2></div><div class="faq-list"><details><summary>어떤 Mac에서 사용할 수 있나요?<span>+</span></summary><p>Stology는 macOS 14 이상의 Apple Silicon Mac을 위한 앱입니다. 지금은 ${DOWNLOAD_VERSION} 미리보기 버전을 내려받을 수 있어요. DMG를 열고 Stology Local을 응용 프로그램 폴더로 옮기면 됩니다. 새 버전은 앱 메뉴의 업데이트 확인으로 받을 수 있습니다.</p></details><details><summary>AI를 연결해야 노트도 쓸 수 있나요?<span>+</span></summary><p>노트 작성과 PDF 필기는 AI를 연결하지 않아도 사용할 수 있어요. 자료 분석과 학습도우미를 이용하려면 지원하는 AI 공급자의 계정과 공식 CLI 연결이 필요합니다. 이용 범위는 연결한 계정의 조건을 따릅니다.</p></details><details><summary>내 자료가 자동으로 AI에 전달되나요?<span>+</span></summary><p>자료를 열거나 필기하는 것만으로 분석을 시작하지 않습니다. 분석할 자료를 직접 고르고 요청해야 해당 자료가 AI 공급자에게 전달돼요. 학습도우미에는 직접 입력한 질문과 첨부한 이미지를 보냅니다.</p></details><details><summary>PDF 필기는 어디에 저장되나요?<span>+</span></summary><p>앱이 관리하는 작업 PDF에 저장합니다. 처음 가져온 외부 원본을 자동으로 덮어쓰지 않아요. 저장 상태를 확인하고 최신 필기가 반영된 PDF를 공유할 수 있습니다.</p></details></div></section>
-<section class="closing container"><div class="closing-orbit" aria-hidden="true"></div><div class="closing-mark" aria-hidden="true"><img src="/mark.png" alt="" width="64" height="64"><img class="closing-star" src="/media/hero/star.webp" alt="" width="46" height="46" loading="lazy"></div><p class="section-index">YOUR NOTES. YOUR CONNECTIONS.</p><h2>${copy.endTitle}</h2><p>${copy.endBody}</p><a class="button button-primary" href="${DOWNLOAD_URL}" download>Mac용 다운로드 ${downloadIcon}</a></section>
-</main><footer class="container"><a class="brand" href="#"><img src="/mark.png" alt="" width="26" height="26"><span>stology.</span></a><span>배운 것을, 나의 것으로.</span><div><button data-open-info>사용 환경 안내 ↗</button><small>© ${new Date().getFullYear()} Stology</small></div></footer>
-<dialog id="environment-dialog" aria-labelledby="dialog-title"><button class="dialog-close" aria-label="안내 닫기">×</button><img src="/mark.png" alt="" width="40" height="40"><p class="section-index">STOLOGY FOR MAC</p><h2 id="dialog-title">Mac에서 만나는 Stology</h2><p>macOS 14 이상의 Apple Silicon Mac에서 사용할 수 있어요. 지금은 ${DOWNLOAD_VERSION} 미리보기 버전이며, 내려받은 DMG를 열어 Stology Local을 응용 프로그램 폴더로 옮기면 설치됩니다.</p><p>노트 작성과 PDF 필기는 AI 없이 사용할 수 있습니다. AI 기능은 지원하는 계정 연결이 필요해요.</p><a class="button button-primary" href="${DOWNLOAD_URL}" download>Mac용 다운로드 ${downloadIcon}</a></dialog>`;
+const downloadLink = (place, cls = 'button button-primary') => `<a class="${cls}" href="${DOWNLOAD_URL}" download data-track="download_click:${place}">${esc(S.nav.download)} ${downloadIcon}</a>`;
+const discordLink = (label, place, cls = 'discord-link') => `<a class="${cls}" href="${DISCORD_URL}" target="_blank" rel="noopener" aria-label="${esc(S.discordUrlLabel)}" data-track="outbound:discord-${place}">${discordIcon}<span>${esc(label)}</span></a>`;
+const heading = (sec, extra = '') => `<div class="section-heading reveal"><div><p class="section-index">${sec.index} <span>/</span> ${esc(sec.label)}</p><h2>${sec.title}</h2></div><p>${esc(sec.body || '')}${extra}</p></div>`;
 
+document.querySelector('#app').innerHTML = `
+<a class="skip-link" href="#main">${esc(S.nav.skip)}</a>
+<header class="site-header"><div class="header-inner">
+  <a class="brand" href="${S.path}" aria-label="${esc(S.nav.brandAria)}"><img src="/mark.png" alt="" width="30" height="30"><span>stology<span class="brand-dot">.</span></span></a>
+  <nav aria-label="${esc(S.nav.menuAria)}"><a href="#one-window">${esc(S.nav.overview)}</a><a href="#notes">${esc(S.nav.features)}</a><a href="#start">${esc(S.nav.start)}</a><a href="#faq">${esc(S.nav.faq)}</a></nav>
+  <div class="header-right"><div class="lang-toggle" role="group" aria-label="${esc(S.nav.langAria)}">${lang === 'ko' ? `<span lang="ko" aria-current="true">KO</span><a href="/en/" hreflang="en" lang="en" aria-label="${esc(S.other.aria)}" data-lang-link>EN</a>` : `<a href="/" hreflang="ko" lang="ko" aria-label="${esc(S.other.aria)}" data-lang-link>KO</a><span lang="en" aria-current="true">EN</span>`}</div>${downloadLink('header', 'environment-link')}</div>
+</div></header>
+<main id="main">
+<div class="hero-stage"><canvas id="hero-scene" role="img" aria-label="${esc(S.hero.canvasAria)}"></canvas><section class="hero container" aria-labelledby="hero-title">
+  <div class="hero-copy"><div class="eyebrow"><span class="status-light"></span> ${esc(S.hero.eyebrow)} <span class="eyebrow-line"></span></div><h1 id="hero-title">${esc(S.hero.title)}<br><span>${esc(S.hero.accent)}</span></h1><p class="hero-description">${esc(S.hero.body)}</p><div class="hero-actions">${downloadLink('hero')}<a class="text-link" href="#one-window">${esc(S.hero.secondary)} <span>↘</span></a></div><div class="hero-platform"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="3" width="16" height="12" rx="2" stroke="currentColor"/><path d="M12 15v5m-5 0h10" stroke="currentColor"/></svg> ${S.hero.req.map(esc).join(' <i></i> ')}</div></div>
+  <div class="hero-art"><div class="art-label label-top"><span class="tiny-cross">+</span> ${esc(S.hero.labelTop)}</div><div class="art-label label-bottom"><span class="tiny-cross">+</span> ${esc(S.hero.labelBottom)}</div><div class="art-coordinate">${esc(S.hero.coordinate)}</div><button class="motion-toggle" aria-label="${esc(S.hero.pause)}" aria-pressed="false">Ⅱ</button></div>
+  <div class="hero-bottom"><div class="trust-list">${S.hero.trust.map(t => `<span><i></i>${esc(t)}</span>`).join('')}</div><a href="#one-window" aria-label="${esc(S.hero.scrollAria)}">↓</a></div>
+</section></div>
+
+<section id="one-window" class="one-window section container">${heading(S.window)}
+  <div class="reveal"><div class="frame-label"><span class="status-light"></span> ${esc(S.window.frameLabel)} <span>${esc(S.window.frameNote)}</span></div><div class="window-stage" role="img" aria-label="${esc(S.window.aria)}"></div><div class="step-chips" aria-hidden="true">${S.window.steps.map((s, i) => `<span data-step="${i}"><b>0${i + 1}</b>${esc(s)}</span>`).join('')}</div></div>
+</section>
+
+<section id="today" class="problem section container">${heading(S.problem)}
+  <div class="problem-stage"><div class="problem-cards">${S.problem.cards.map(c => `<article class="pcard"><div class="bar"><i></i><i></i><i></i><span>${esc(c.tag)}</span></div><div class="lines"><i></i><i></i><i></i></div><h3>${esc(c.h)}</h3><p>${esc(c.p)}</p></article>`).join('')}</div></div>
+  <p class="resolve"><span>${esc(S.problem.resolve)}</span></p>
+</section>
+
+<section id="promises" class="section container">${heading(S.promises)}
+  <div class="promise-grid reveal">${S.promises.items.map((p, i) => `<article class="promise"><span class="p-num">0${i + 1}</span><div class="p-icon">${icon(p.icon)}</div><h3>${esc(p.h)}</h3><p>${esc(p.p)}</p></article>`).join('')}</div>
+  <div class="promise-foot reveal"><span>${esc(S.promises.note)}</span><a href="#faq-transfer" data-open-faq="transfer">${esc(S.promises.link)}</a></div>
+</section>
+
+<section id="notes" class="section demo-section container">${heading(S.notes)}${createExplorerMarkup('notes', noteItems, S)}</section>
+
+<section id="pdf" class="pdf-section"><div class="container section">${heading(S.pdf)}${createExplorerMarkup('pdf', pdfItems, S)}<div class="section-footnote">${icon('note')}<p>${esc(S.pdf.footnote)}</p></div></div></section>
+
+<section id="map" class="map-section section container">${heading(S.map)}
+  <figure class="map-figure reveal"><img src="/media/map-overview.jpg" alt="${esc(S.map.alt)}" width="880" height="780" loading="lazy"><span class="callout c1"><i></i>${esc(S.map.callouts[0])}</span><span class="callout c2"><i></i>${esc(S.map.callouts[1])}</span><figcaption class="map-caption"><span>${esc(S.map.caption)}</span><span>${icon('map')}</span></figcaption></figure>
+  <p class="map-note">${esc(S.map.note)}</p>
+</section>
+
+<section id="start" class="steps-section section container">${heading(S.start)}
+  <div class="step-grid reveal">${S.start.steps.map((s, i) => `<article class="step"><div class="s-num">0${i + 1}</div><h3>${esc(s.h)}</h3><p>${esc(s.p)}</p></article>`).join('')}</div>
+  <div class="step-foot reveal"><p class="note">${esc(S.start.note)}</p><div class="actions">${downloadLink('steps')}${discordLink(S.start.discord, 'steps')}</div></div>
+</section>
+
+<section id="faq" class="faq-section container section"><div><p class="section-index">${S.faq.index} <span>/</span> ${esc(S.faq.label)}</p><h2>${S.faq.title}</h2></div><div class="faq-list">${S.faq.items.map(item => `<details${item.id ? ` id="faq-${item.id}"` : ''}><summary>${esc(item.q)}<span>+</span></summary><p>${esc(item.a)}</p>${item.discord ? discordLink('Discord', 'faq') : ''}</details>`).join('')}</div></section>
+
+<section class="closing container"><div class="closing-orbit" aria-hidden="true"></div><div class="closing-mark" aria-hidden="true"><img src="/mark.png" alt="" width="64" height="64"><img class="closing-star" src="/media/hero/star.webp" alt="" width="46" height="46" loading="lazy"></div><p class="section-index">${esc(S.closing.index)}</p><h2>${esc(S.closing.title)}</h2><p>${esc(S.closing.body)}</p><div class="closing-links">${downloadLink('closing')}${discordLink(S.closing.discord, 'closing')}</div></section>
+</main>
+<footer class="container"><a class="brand" href="${S.path}"><img src="/mark.png" alt="" width="26" height="26"><span>stology.</span></a><span>${esc(S.footer.tagline)}</span><div><div class="foot-links"><a href="${RELEASES_URL}" target="_blank" rel="noopener" data-track="outbound:release-notes">${esc(S.footer.release)}</a><a href="${DISCORD_URL}" target="_blank" rel="noopener" data-track="outbound:discord-footer">${discordIcon}${esc(S.footer.discord)}</a><button data-open-info>${esc(S.footer.data)}</button></div><small>© ${new Date().getFullYear()} ${esc(S.footer.copyright)}</small></div></footer>
+<dialog id="data-dialog" aria-labelledby="dialog-title"><button class="dialog-close" aria-label="${esc(S.dataDialog.close)}">×</button><img src="/mark.png" alt="" width="40" height="40"><p class="section-index">STOLOGY</p><h2 id="dialog-title">${esc(S.dataDialog.title)}</h2><p>${esc(S.dataDialog.p1)}</p><p>${esc(S.dataDialog.p2)}</p></dialog>`;
+
+/* ---------- 히어로 ---------- */
 const heroScene = initHeroScene(document.querySelector('#hero-scene'), { anchor: document.querySelector('.hero-art'), surface: document.querySelector('.hero-stage') });
-const motionToggle=document.querySelector('.motion-toggle');
-motionToggle.addEventListener('click',()=>{const paused=motionToggle.getAttribute('aria-pressed')!=='true';heroScene.setPaused?.(paused);motionToggle.setAttribute('aria-pressed',String(paused));motionToggle.setAttribute('aria-label',paused?'메인 애니메이션 재생':'메인 애니메이션 일시정지');motionToggle.textContent=paused?'▷':'Ⅱ';});
-const reduceMotion=matchMedia('(prefers-reduced-motion: reduce)');
-mountExplorer('shortcuts',shortcuts);
-mountExplorer('pdf',pdfTools);
-const revealObserver=new IntersectionObserver(entries=>{entries.forEach(entry=>{if(entry.isIntersecting){entry.target.classList.add('visible');revealObserver.unobserve(entry.target);}});},{threshold:0.08});
-document.querySelectorAll('.reveal').forEach(element=>revealObserver.observe(element));
-const dialog=document.querySelector('dialog');document.querySelectorAll('[data-open-info]').forEach(button=>button.addEventListener('click',()=>dialog.showModal()));document.querySelectorAll('.dialog-close,.dialog-done').forEach(button=>button.addEventListener('click',()=>dialog.close()));dialog.addEventListener('click',event=>{if(event.target===dialog){const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)dialog.close();}});
-const navLinks=[...document.querySelectorAll('nav a')];
-let navScheduled=false;
-function updateNav(){navScheduled=false;let activeId='';for(const id of ['workspace','shortcuts','pdf']){if(document.getElementById(id).getBoundingClientRect().top<=innerHeight*.35)activeId=id;}navLinks.forEach(link=>{const active=link.hash===`#${activeId}`;link.classList.toggle('active',active);if(active)link.setAttribute('aria-current','location');else link.removeAttribute('aria-current');});}
-window.addEventListener('scroll',()=>{if(!navScheduled){navScheduled=true;requestAnimationFrame(updateNav);}},{passive:true});updateNav();
-function syncMotionPreference(){motionToggle.disabled=reduceMotion.matches;if(reduceMotion.matches){motionToggle.setAttribute('aria-label','시스템의 동작 줄이기 설정으로 애니메이션이 정지됨');motionToggle.textContent='▷';}else{const paused=motionToggle.getAttribute('aria-pressed')==='true';motionToggle.setAttribute('aria-label',paused?'메인 애니메이션 재생':'메인 애니메이션 일시정지');motionToggle.textContent=paused?'▷':'Ⅱ';}}
-reduceMotion.addEventListener('change',syncMotionPreference);syncMotionPreference();
+const motionToggle = document.querySelector('.motion-toggle');
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+motionToggle.addEventListener('click', () => { const paused = motionToggle.getAttribute('aria-pressed') !== 'true'; heroScene.setPaused?.(paused); motionToggle.setAttribute('aria-pressed', String(paused)); motionToggle.setAttribute('aria-label', paused ? S.hero.play : S.hero.pause); motionToggle.textContent = paused ? '▷' : 'Ⅱ'; });
+function syncMotionPreference() { motionToggle.disabled = reduceMotion.matches; if (reduceMotion.matches) { motionToggle.setAttribute('aria-label', S.hero.reduced); motionToggle.textContent = '▷'; } else { const paused = motionToggle.getAttribute('aria-pressed') === 'true'; motionToggle.setAttribute('aria-label', paused ? S.hero.play : S.hero.pause); motionToggle.textContent = paused ? '▷' : 'Ⅱ'; } }
+reduceMotion.addEventListener('change', syncMotionPreference); syncMotionPreference();
+
+/* ---------- 장면: 글꼴이 준비된 뒤에 치수를 재야 한다 ---------- */
+const chips = [...document.querySelectorAll('.step-chips span')];
+const mountScenes = () => {
+  createPlayer(document.querySelector('.window-stage'), ctx => windowLoop({ ...ctx, S, lang, onStep: i => chips.forEach((c, n) => c.classList.toggle('on', n === i)) }), {});
+  mountExplorer('notes', noteItems, S, { lang, scenes: noteScenes });
+  mountExplorer('pdf', pdfItems, S, { lang, scenes: pdfScenes });
+};
+(document.fonts?.ready || Promise.resolve()).then(mountScenes);
+
+/* ---------- 드러나기 · 문제 섹션 ---------- */
+const revealObserver = new IntersectionObserver(entries => { entries.forEach(entry => { if (entry.isIntersecting) { entry.target.classList.add('visible'); revealObserver.unobserve(entry.target); } }); }, { threshold: .08 });
+document.querySelectorAll('.reveal').forEach(el => revealObserver.observe(el));
+const problemStage = document.querySelector('.problem-stage');
+const problemObserver = new IntersectionObserver(entries => { entries.forEach(entry => { if (!entry.isIntersecting) return; problemObserver.disconnect(); problemStage.classList.add('visible'); setTimeout(() => problemStage.classList.add('merged'), reduceMotion.matches ? 0 : 1500); }); }, { threshold: .35 });
+problemObserver.observe(problemStage);
+
+/* ---------- 대화상자 · FAQ 연결 ---------- */
+const dialog = document.querySelector('#data-dialog');
+document.querySelectorAll('[data-open-info]').forEach(b => b.addEventListener('click', () => { dialog.showModal(); track('data_notice_open'); }));
+dialog.querySelector('.dialog-close').addEventListener('click', () => dialog.close());
+dialog.addEventListener('click', event => { if (event.target === dialog) dialog.close(); });
+document.querySelectorAll('[data-open-faq]').forEach(a => a.addEventListener('click', () => { const d = document.querySelector(`#faq-${a.dataset.openFaq}`); if (d) d.open = true; }));
+document.querySelectorAll('.faq-list details').forEach(d => d.addEventListener('toggle', () => { if (d.open) track('faq_open', { id: d.id || d.querySelector('summary').textContent.slice(0, 40) }); }));
+
+/* ---------- 메뉴 현재 위치 · 언어 전환 ---------- */
+const navLinks = [...document.querySelectorAll('nav a')];
+const anchors = ['one-window', 'notes', 'start', 'faq'];
+let navScheduled = false;
+function updateNav() { navScheduled = false; let activeId = ''; for (const id of anchors) { const el = document.getElementById(id); if (el && el.getBoundingClientRect().top <= innerHeight * .35) activeId = id; } navLinks.forEach(link => { const active = link.hash === `#${activeId}`; link.classList.toggle('active', active); if (active) link.setAttribute('aria-current', 'location'); else link.removeAttribute('aria-current'); }); }
+window.addEventListener('scroll', () => { if (!navScheduled) { navScheduled = true; requestAnimationFrame(updateNav); } }, { passive: true }); updateNav();
+document.querySelector('[data-lang-link]')?.addEventListener('click', event => { const a = event.currentTarget; a.href = a.getAttribute('href').split('#')[0] + location.hash; try { localStorage.setItem('stology-lang', a.lang); } catch { /* 저장 못 해도 이동은 한다 */ } track('lang_switch', { to: a.lang }); });
+bindTracking();

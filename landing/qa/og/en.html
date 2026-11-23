@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>OG en</title>
+<style>
+  @font-face{font-family:SUIT;src:url('/fonts/SUIT-Variable.woff2') format('woff2');font-weight:100 900}
+  html,body{margin:0;background:#08090d}
+  .card{position:relative;width:1200px;height:630px;overflow:hidden;background:#08090d;font-family:SUIT,sans-serif;color:#f4f3f8}
+  .hero-stage{position:absolute;inset:0;z-index:0}
+  .hero-stage canvas{position:absolute;inset:0;width:100%;height:100%}
+  .hero-art{position:absolute;right:36px;top:30px;width:540px;height:560px}
+  .shade{position:absolute;inset:0;z-index:1;background:linear-gradient(90deg,#08090dcc 0%,#08090d99 40%,#08090d00 62%)}
+  .brand,h1,p,.meta{z-index:2}
+  .brand{position:absolute;left:72px;top:64px;display:flex;align-items:center;gap:14px;font-size:34px;font-weight:700;letter-spacing:-1.2px}
+  .brand img{width:40px;height:40px}
+  .brand i{color:#b5aaff;font-style:normal}
+  h1{position:absolute;left:72px;top:190px;margin:0;font-size:66px;line-height:1.22;font-weight:500;letter-spacing:-2.4px;white-space:nowrap}
+  h1 span{background:linear-gradient(110deg,#d9d5ff,#9c8dff 80%);-webkit-background-clip:text;background-clip:text;color:transparent}
+  p{position:absolute;left:72px;top:390px;margin:0;font-size:23px;line-height:1.6;color:#b9b6c8;max-width:600px}
+  .meta{position:absolute;left:72px;bottom:56px;font-size:16px;color:#8f8ca0;letter-spacing:.3px}
+</style>
+</head>
+<body>
+<div class="card"><div class="hero-stage"><canvas id="hero-scene"></canvas><div class="hero-art"></div></div><div class="shade"></div>
+  <div class="brand"><img src="/mark.png" alt=""><span>stology<i>.</i></span></div>
+  <h1>You already pay for AI.<br><span>Use it to study.</span></h1>
+  <p>Your Claude or ChatGPT plan, signed in as is. Lecture PDFs, notes, questions, and a course map in one Mac window.</p>
+  <div class="meta">Apple Silicon Mac · macOS 14 or later · Preview 0.1.0 · Korean interface</div>
+</div>
+<script type="module">import { initHeroScene } from "/src/hero-scene.js"; initHeroScene(document.querySelector("#hero-scene"), { anchor: document.querySelector(".hero-art"), surface: document.querySelector(".hero-stage") });</script>
+</body>
+</html>

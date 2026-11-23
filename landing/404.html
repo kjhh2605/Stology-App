@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <meta name="theme-color" content="#08090d" />
+    <title>Stology — 페이지를 찾을 수 없어요</title>
+    <link rel="icon" type="image/png" href="/mark.png" />
+    <style>
+      @font-face{font-family:SUIT;src:url('/fonts/SUIT-Variable.woff2') format('woff2');font-weight:100 900;font-display:swap}
+      html{color-scheme:dark;background:#08090d;color:#f4f3f8;font-family:SUIT,-apple-system,sans-serif}
+      body{margin:0;min-height:100vh;display:grid;place-items:center;text-align:center;padding:40px 20px;box-sizing:border-box}
+      .mark{position:relative;display:inline-block;width:64px;height:64px;margin-bottom:28px}
+      .mark .star{position:absolute;right:-34px;top:-22px;animation:bob 4.2s ease-in-out infinite}
+      @keyframes bob{0%,100%{transform:translateY(0) rotate(9deg)}50%{transform:translateY(-7px) rotate(-3deg)}}
+      @media(prefers-reduced-motion:reduce){.mark .star{animation:none}}
+      h1{font-size:32px;font-weight:500;letter-spacing:-1px;margin:0 0 10px}
+      p{color:#a0a0af;margin:0 0 28px;line-height:1.8}
+      a{display:inline-flex;align-items:center;gap:10px;color:#171423;background:#d9d3ff;border-radius:6px;padding:14px 20px;font-weight:700;text-decoration:none;font-size:14px;margin:0 6px}
+      a.ghost{background:transparent;color:#c0bdcd;border:1px solid #353440;font-weight:500}
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark"><img src="/mark.png" alt="" width="64" height="64"><img class="star" src="/media/hero/star.webp" alt="" width="46" height="46"></div>
+      <h1>별이 길을 잃었어요.</h1>
+      <p>찾는 페이지가 없어요. 처음 화면으로 돌아가 주세요.<br><span lang="en">This page doesn’t exist. Head back to the start.</span></p>
+      <a href="/">처음으로</a><a class="ghost" href="/en/" lang="en" hreflang="en">English</a>
+    </main>
+  </body>
+</html>
