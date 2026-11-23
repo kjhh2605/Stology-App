@@ -55,7 +55,7 @@ npm run preview --prefix landing
 시연 자료는 교양 수업인 ‘심리학의 이해’의 기억·학습 예시로 작성했다. 개인 데이터와 분리한 시험용 Stology에서 실제 조작을 촬영하고, 관련 부분의 크롭·축소와 영상 인코딩을 거쳐 제공한다. 설명용 DOM 장면을 녹화한 영상으로 대체하지 않는다. 녹화 도구와 자산 정보는 [촬영 기록](public/media/README.md), [영상 manifest](public/media/manifest.json)에 남긴다. 영상에는 음성·자막·VTT 트랙을 넣지 않는다. PDF의 저장 대상은 하단 안내에서 확인할 수 있다.
 
 - 주요 설명 문구는 사용자가 지정한 `im-not-ai`의 `humanize-korean` 절차로 윤문했다.
-- 공개 다운로드 주소는 아직 없다. 버튼은 기능 소개와 사용 환경 안내로 연결하며 다운로드가 준비된 것처럼 표시하지 않는다.
+- 다운로드 버튼(헤더·히어로·마무리·사용 환경 안내)은 GitHub 릴리스의 공증된 DMG로 바로 연결한다. 새 버전을 게시하면 `src/main.js`의 `DOWNLOAD_VERSION`을 올린다.
 - 계정, 서버, 수집 폼, 분석 추적기를 추가하지 않았다. AI 연결·자료 전송 안내는 현재 앱의 제품 정책을 따른다.
 
 랜딩 코드만 수정할 때는 Mac 앱 테스트·재설치가 필요하지 않다. 앱 코드를 별도로 수정했다면 저장소 [작업 규칙](../AGENTS.md)을 따른다. 정적 사이트 선택은 [ADR-023](../decisions/2026-11-17/ADR-023-korean-product-landing.md), 이전 모션 구현은 [ADR-024](../decisions/2026-11-17/ADR-024-feature-motion-catalog.md), 현재 실제 녹화·자동 반복 방식은 [ADR-025](../decisions/2026-11-17/ADR-025-passive-native-demos.md), 마크와 별 스프라이트는 [ADR-031](../decisions/2026-11-22/ADR-031-landing-hero-icon-ribbon-and-star-sprites.md), S자 은하수와 별 하나는 [ADR-032](../decisions/2026-11-22/ADR-032-landing-hero-galaxy-stream-and-single-star.md), 전체 폭 하늘·포인터 반응·별의 무작위 행동은 [ADR-033](../decisions/2026-11-22/ADR-033-landing-hero-sky-behind-copy-and-free-star.md)에 기록했다.
