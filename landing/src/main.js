@@ -68,7 +68,7 @@ document.querySelector('#app').innerHTML = `
 <section id="pdf" class="pdf-section"><div class="container section">${heading(S.pdf)}${createExplorerMarkup('pdf', pdfItems, S)}<div class="section-footnote">${icon('note')}<p>${esc(S.pdf.footnote)}</p></div></div></section>
 
 <section id="map" class="map-section section container">${heading(S.map)}
-  <figure class="map-figure reveal"><img src="/media/map-overview.jpg" alt="${esc(S.map.alt)}" width="880" height="780" loading="lazy"><span class="callout c1"><i></i>${esc(S.map.callouts[0])}</span><span class="callout c2"><i></i>${esc(S.map.callouts[1])}</span><figcaption class="map-caption"><span>${esc(S.map.caption)}</span><span>${icon('map')}</span></figcaption></figure>
+  <div class="atlas-stage reveal" role="img" aria-label="${esc(S.map.aria)}"></div>
   <p class="map-note">${esc(S.map.note)}</p>
 </section>
 
@@ -98,6 +98,8 @@ const mountScenes = () => {
   createPlayer(document.querySelector('.window-stage'), ctx => windowLoop({ ...ctx, S, lang, onStep: i => chips.forEach((c, n) => c.classList.toggle('on', n === i)) }), {});
   mountExplorer('notes', noteItems, S, { lang, scenes: noteScenes });
   mountExplorer('pdf', pdfItems, S, { lang, scenes: pdfScenes });
+  // 과목 지도 장면(지도 데이터·엔진)은 페이지 아래쪽이라 따로 받아 첫 화면 번들을 늘리지 않는다
+  import('./scenes/atlas-loop.js').then(({ atlasLoop }) => createPlayer(document.querySelector('.atlas-stage'), ctx => atlasLoop({ ...ctx, S, lang }), {}));
 };
 (document.fonts?.ready || Promise.resolve()).then(mountScenes);
 

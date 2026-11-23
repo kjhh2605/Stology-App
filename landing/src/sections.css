@@ -69,13 +69,8 @@
 
 /* 06 과목 지도 */
 .map-section{border-top:1px solid var(--line)}
-.map-figure{position:relative;margin-top:10px;background:#14121e;border:1px solid #393141;border-radius:12px;overflow:hidden;box-shadow:0 0 100px #6952ab0b}
-.map-figure img{display:block;width:100%;height:auto;background:#dcd5f4}
-.map-figure .callout{position:absolute;display:flex;align-items:center;gap:8px;font-size:11px;color:#efeaff;background:#14121ee6;border:1px solid #7b67c7;border-radius:999px;padding:7px 12px;backdrop-filter:blur(8px);white-space:nowrap}
-.map-figure .callout i{width:6px;height:6px;border-radius:50%;background:#aea5ff;box-shadow:0 0 10px #8e7eff}
-.map-figure .callout.c1{right:3.5%;top:46%}
-.map-figure .callout.c2{right:3.5%;top:85%}
-.map-caption{display:flex;justify-content:space-between;gap:20px;padding:14px 20px;font-size:11px;color:#9a8fb0;background:#13111a;border-top:1px solid #2b2634;flex-wrap:wrap}
+.atlas-stage{margin-top:10px;position:relative}
+.atlas-stage .app-frame-wrap{box-shadow:0 0 0 1px #ffffff14,0 40px 120px #000000aa,0 0 140px #6952ab14}
 .map-note{margin-top:18px;font-size:12px;color:#8f8ca0;max-width:620px;line-height:1.8}
 
 /* 07 시작하기 */
@@ -116,7 +111,6 @@ footer .foot-links svg{width:13px;height:13px}
   .resolve{font-size:24px;margin-top:30px}
   .promise-grid{grid-template-columns:1fr}
   .step-grid{grid-template-columns:1fr}.step+.step{border-left:0;border-top:1px solid #2f2a3a}
-  .map-figure .callout{font-size:10px;padding:6px 10px}.map-figure .callout.c1{top:40%}.map-figure .callout.c2{top:80%}
   .closing-links{gap:16px}
   footer .foot-links{gap:14px;flex-wrap:wrap}
 }

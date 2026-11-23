@@ -2,7 +2,7 @@
 import { UI } from './ui-labels.js';
 import { createKeyToast, createPointer, fitFrame } from './runtime.js';
 
-export const FRAME = { document: [720, 450], pdf: [720, 450], map: [720, 450], window: [1120, 700] };
+export const FRAME = { document: [720, 450], pdf: [720, 450], map: [720, 450], window: [1120, 700], atlas: [1120, 700] };
 
 export const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const h = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
