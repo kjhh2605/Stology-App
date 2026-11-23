@@ -15,6 +15,12 @@ done
 if [[ "$INSTALL" == true ]]; then
  python3 "$ROOT/scripts/install.py" --check-idle
 fi
+# 공개 배포(scripts/release.sh)가 지정한다. 개발 빌드는 기본값과 Sparkle 없는 앱을 쓴다.
+VERSION="${STOLOGY_VERSION:-0.1.0}"
+BUILD="${STOLOGY_BUILD:-1}"
+SPARKLE="${STOLOGY_SPARKLE:-}"
+FEED_URL='https://stology-app.vercel.app/updates/appcast.xml'
+SPARKLE_PUBLIC_KEY='pWi1bdG0ZNvvkjO7LTCdSwWH7gia/gQ/Nuo0EX+uJtg='
 export MACOSX_DEPLOYMENT_TARGET=14.0
 if [[ "$(uname -m)" != arm64 ]]; then echo 'Apple Silicon Mac이 필요합니다.' >&2; exit 1; fi
 cargo build --locked --release --manifest-path "$ROOT/core/Cargo.toml"
@@ -34,15 +40,25 @@ mkdir -p "$APP/Contents/Resources/Licenses"
 cp "$ROOT/docs/THIRD-PARTY.md" "$APP/Contents/Resources/Licenses/"
 cp "$ROOT/assets/fonts/OFL.txt" "$APP/Contents/Resources/Licenses/SUIT-OFL.txt"
 cp -R "$ROOT/docs/third-party" "$APP/Contents/Resources/Licenses/"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+rm -rf "$APP/Contents/Frameworks"
+SPARKLE_KEYS=''
+if [[ -n "$SPARKLE" ]]; then
+ mkdir -p "$APP/Contents/Frameworks"
+ ditto "$SPARKLE" "$APP/Contents/Frameworks/Sparkle.framework"
+ SPARKLE_KEYS="<key>SUFeedURL</key><string>$FEED_URL</string>
+<key>SUPublicEDKey</key><string>$SPARKLE_PUBLIC_KEY</string>"
+fi
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleName</key><string>Stology Local</string>
+<key>CFBundleDevelopmentRegion</key><string>ko</string>
+<key>CFBundleLocalizations</key><array><string>ko</string></array>
 <key>CFBundleDisplayName</key><string>Stology Local</string>
 <key>CFBundleIdentifier</key><string>app.stology.local</string>
-<key>CFBundleVersion</key><string>1</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>$BUILD</string>
+<key>CFBundleShortVersionString</key><string>$VERSION</string>
 <key>CFBundleExecutable</key><string>stology-local</string>
 <key>CFBundleIconFile</key><string>StologyLocal</string>
 <key>CFBundlePackageType</key><string>APPL</string>
@@ -50,8 +66,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSHumanReadableCopyright</key><string>Stology Local — personal test build</string>
+$SPARKLE_KEYS
 </dict></plist>
 PLIST
+if [[ -n "$SPARKLE" ]]; then codesign --force --deep --sign - "$APP/Contents/Frameworks/Sparkle.framework"; fi
 for binary in stology-core stology-extract stology-local; do codesign --force --sign - "$APP/Contents/MacOS/$binary"; done
 codesign --force --sign - "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"

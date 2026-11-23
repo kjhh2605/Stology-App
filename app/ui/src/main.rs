@@ -44,6 +44,7 @@ mod sidebar_resize;
 mod sidebar_hide;
 mod sidebar_reveal;
 mod theme;
+mod updater;
 mod window_appearance;
 
 const TITLE_DIVIDER_INSET: f64 = 14.;
@@ -5504,10 +5505,21 @@ impl ProviderTone {
         NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.)
     }
 }
-unsafe fn menu(app: &NSApplication, target: &Delegate) {
+unsafe fn menu(app: &NSApplication, target: &Delegate, updater: Option<&AnyObject>) {
     let main = NSMenu::new(mtm());
     let item = NSMenuItem::new(mtm());
     let m = NSMenu::new(mtm());
+    if let Some(updater) = updater {
+        let check = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm()),
+            &NSString::from_str("업데이트 확인…"),
+            Some(sel!(checkForUpdates:)),
+            &NSString::from_str(""),
+        );
+        check.setTarget(Some(updater));
+        m.addItem(&check);
+        m.addItem(&NSMenuItem::separatorItem(mtm()));
+    }
     let quit = NSMenuItem::initWithTitle_action_keyEquivalent(
         NSMenuItem::alloc(mtm()),
         &NSString::from_str("Stology 종료"),
@@ -5634,7 +5646,8 @@ fn main() {
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         let target: Retained<Delegate> = msg_send![Delegate::alloc(mtm()), init];
         app.setDelegate(Some(ProtocolObject::from_ref(&*target)));
-        menu(&app, &target);
+        let updater = updater::start();
+        menu(&app, &target, updater);
         let window = NSWindow::initWithContentRect_styleMask_backing_defer(
             window_appearance::alloc(mtm()),
             rect(0., 0., 1280., 820.),
