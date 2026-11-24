@@ -171,8 +171,8 @@ unsafe fn check_after_table_caret(text: &NSTextView, window: &NSWindow) {
     let empty = caret_top("");
     let typed = caret_top("본문");
     let extra_blank = caret_top("\n본문");
-    assert!((empty - typed).abs() < 1.0, "typing after the table shifted the caret vertically");
-    assert!((typed - extra_blank - 24.0).abs() < 1.0, "an extra blank line should remain visible");
+    assert!((empty - typed).abs() < 1.0, "typing after the table shifted the caret vertically: empty={empty}, typed={typed}");
+    assert!((typed - extra_blank - 26.0).abs() < 1.0, "an extra blank line should remain visible: typed={typed}, extra={extra_blank}");
 }
 
 unsafe fn check_block_clicks(text: &NSTextView, window: &NSWindow) {
@@ -202,10 +202,10 @@ unsafe fn check_block_clicks(text: &NSTextView, window: &NSWindow) {
     click(side);
     insert("오른쪽");
     let caret = caret_rect();
-    assert!(caret.origin.x > frame.origin.x + frame.size.width && (side.y - caret.origin.y).abs() < 24.,
+    assert!(caret.origin.x > frame.origin.x + frame.size.width && (side.y - caret.origin.y).abs() < 26.,
         "side click {side:?} placed text at {caret:?}");
     assert!(text.string().to_string().ends_with("뒤 문단") && cells(text).len() == 4);
-    click(NSPoint::new(side.x, side.y - 24.));
+    click(NSPoint::new(side.x, side.y - 26.));
     insert("윗줄");
     assert!(text.string().to_string().contains("윗줄\n오른쪽"), "{:?}, caret {:?}, table {:?}", text.string().to_string(), caret_rect(), frame);
     for block in [table, "```rs\nfn example() {}\n```\n", "```rs\nfn example() {}\n```"] {
@@ -216,7 +216,7 @@ unsafe fn check_block_clicks(text: &NSTextView, window: &NSWindow) {
         click(below);
         insert("아래 본문");
         let caret = caret_rect();
-        assert!((below.y - caret.origin.y).abs() < 24.,
+        assert!((below.y - caret.origin.y).abs() < 26.,
             "below click {below:?} placed text at {caret:?} for {:?}", text.string().to_string());
         assert!(text.string().to_string().ends_with("\n아래 본문"));
     }

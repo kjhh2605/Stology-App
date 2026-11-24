@@ -1,7 +1,7 @@
 // TextKit hit testing can only return a position in the existing string.
 // Make blank writing rows addressable without placing the caret in a hidden
 // table row, attachment link or closing fence.
-const NOTE_LINE_HEIGHT: f64 = 24.0;
+// NOTE_LINE_HEIGHT is shared with the editor's body typography.
 
 impl MarkdownEditor {
     unsafe fn place_block_caret(&self, event: &NSEvent) -> bool {

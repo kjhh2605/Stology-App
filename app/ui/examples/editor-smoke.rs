@@ -561,6 +561,60 @@ fn main() {
                 println!("CAPTURE: {output}");
             }
         }
+        // Verify actual TextKit geometry, including a wrapped list item. Extra
+        // item/paragraph spacing must not become spacing on every wrapped row.
+        {
+            let fixture = format!(
+                "### 첫 제목\n본문 첫째\n본문 둘째\n\n1. 첫 항목\n2. 두 번째 {}끝표시\n- [ ] 확인 항목\n### 다음 제목\n마지막 본문\n```rust\nlet value = 1;\n```\n",
+                "한글과 이모지 😀로 길게 이어지는 설명 ".repeat(12),
+            );
+            text.setString(&NSString::from_str(&fixture));
+            text.setSelectedRange(NSRange::new(fixture.encode_utf16().count(), 0));
+            editor::style(&text);
+            scroll.layoutSubtreeIfNeeded();
+            let rect_at = |needle: &str| {
+                let screen: NSRect = msg_send![&*text,firstRectForCharacterRange:NSRange::new(position(&fixture, needle),1),actualRange:std::ptr::null_mut::<NSRange>()];
+                text.convertRect_fromView(window.convertRectFromScreen(screen), None)
+            };
+            let paragraph_at = |needle: &str| -> Retained<NSParagraphStyle> {
+                let storage = text.textStorage().unwrap();
+                msg_send![&*storage,attribute:NSParagraphStyleAttributeName,atIndex:position(&fixture, needle),effectiveRange:std::ptr::null_mut::<NSRange>()]
+            };
+            let body_pitch = rect_at("본문 둘째").origin.y - rect_at("본문 첫째").origin.y;
+            let item_pitch = rect_at("두 번째").origin.y - rect_at("첫 항목").origin.y;
+            assert!((body_pitch - 36.0).abs() < 0.1, "body pitch: {body_pitch}");
+            assert!((item_pitch - 30.0).abs() < 0.1, "list pitch: {item_pitch}");
+            let wrap_height = rect_at("끝표시").origin.y - rect_at("두 번째").origin.y;
+            assert!(wrap_height >= 26.0);
+            assert!((wrap_height / 26.0 - (wrap_height / 26.0).round()).abs() < 0.01, "wrapped list height: {wrap_height}");
+            assert_eq!(paragraph_at("첫 제목").paragraphSpacingBefore(), 0.0);
+            assert_eq!(paragraph_at("다음 제목").paragraphSpacingBefore(), 24.0);
+            assert_eq!(paragraph_at("다음 제목").paragraphSpacing(), 8.0);
+            assert_eq!(paragraph_at("두 번째").paragraphSpacing(), 4.0);
+            assert_eq!(paragraph_at("확인 항목").paragraphSpacing(), 0.0);
+            assert_eq!(paragraph_at("\n1. 첫 항목").paragraphSpacing(), 0.0);
+            assert_eq!(paragraph_at("let value").paragraphSpacing(), 0.0);
+            assert_eq!(text.string().to_string(), fixture);
+            println!("PASS: B note spacing; body pitch={body_pitch}, item pitch={item_pitch}, wrapped height={wrap_height}; heading/blank/task/code boundaries and source preserved.");
+        }
+        {
+            let source = "본문\n### ";
+            text.setString(&NSString::from_str(source));
+            let selection = NSRange::new(source.encode_utf16().count(), 0);
+            text.setSelectedRange(selection);
+            editor::style(&text);
+            let placeholder = text.subviews().into_iter()
+                .find(|view| {
+                    let yes: bool = msg_send![&**view,isKindOfClass:class!(StologyHeadingPlaceholder)];
+                    yes
+                })
+                .expect("empty heading placeholder");
+            let screen: NSRect = msg_send![&*text,firstRectForCharacterRange:selection,actualRange:std::ptr::null_mut::<NSRange>()];
+            let caret = text.convertRect_fromView(window.convertRectFromScreen(screen), None);
+            assert!((placeholder.frame().origin.y - caret.origin.y).abs() < 6.0,
+                "heading placeholder {:?} does not follow its caret {caret:?}", placeholder.frame());
+            println!("PASS: empty heading placeholder follows spaced heading caret.");
+        }
         text.setString(&NSString::from_str(""));
         editor::style(&text);
         let remaining = text

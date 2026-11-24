@@ -33,6 +33,13 @@ pub mod diagram_paint;
 pub use image_edit::{set_image_importer, set_diagram_opener};
 use image_edit::{ImageState, InlineImage};
 
+// B spacing preset: shared by rendering and blank-row caret placement.
+const NOTE_LINE_HEIGHT: f64 = 26.0;
+const NOTE_PARAGRAPH_SPACING: f64 = 10.0;
+const NOTE_LIST_SPACING: f64 = 4.0;
+const NOTE_HEADING_BEFORE: f64 = 24.0;
+const NOTE_HEADING_AFTER: f64 = 8.0;
+
 unsafe fn input_command(text: &NSTextView, command: markdown_input::Command) -> bool {
     let marked: bool = msg_send![text, hasMarkedText];
     if marked || !text.isEditable() {
@@ -1126,6 +1133,9 @@ pub unsafe fn make_editor(frame: NSRect) -> (Retained<NSScrollView>, Retained<NS
     text.setAutomaticLinkDetectionEnabled(false);
     text.setAutomaticDataDetectionEnabled(false);
     text.setFont(Some(&crate::font::regular(16.0)));
+    let paragraph = NSMutableParagraphStyle::new();
+    paragraph.setMinimumLineHeight(NOTE_LINE_HEIGHT);
+    text.setDefaultParagraphStyle(Some(&paragraph));
     text.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
         0.09, 0.094, 0.149, 1.0,
     )));
@@ -1558,7 +1568,23 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
     storage.addAttribute_value_range(NSFontAttributeName, &base, all);
     let paragraph = NSMutableParagraphStyle::new();
     paragraph.setMinimumLineHeight(NOTE_LINE_HEIGHT);
+    paragraph.setParagraphSpacing(NOTE_PARAGRAPH_SPACING);
     storage.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, all);
+    // Empty writing rows keep a 26pt pitch, including rows created by clicking
+    // below/beside an attachment. Do not add paragraph space to blank lines.
+    let blank_paragraph = NSMutableParagraphStyle::new();
+    blank_paragraph.setMinimumLineHeight(NOTE_LINE_HEIGHT);
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        if line.trim().is_empty() {
+            storage.addAttribute_value_range(
+                NSParagraphStyleAttributeName,
+                &blank_paragraph,
+                utf16_range(&source, offset..offset + line.len()),
+            );
+        }
+        offset += line.len();
+    }
     storage.addAttribute_value_range(NSKernAttributeName, &objc2_foundation::NSNumber::new_f64(0.2), all);
     storage.addAttribute_value_range(NSForegroundColorAttributeName, &ink, all);
     let blocks = markdown_shortcuts::blocks(&source);
@@ -1583,6 +1609,12 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 );
                 let paragraph = NSMutableParagraphStyle::new();
                 paragraph.setMinimumLineHeight(size + 6.0);
+                paragraph.setParagraphSpacingBefore(if source[..span.bytes.start].trim().is_empty() {
+                    0.0
+                } else {
+                    NOTE_HEADING_BEFORE
+                });
+                paragraph.setParagraphSpacing(NOTE_HEADING_AFTER);
                 storage.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, range);
             }
             Treatment::Bold => apply_font_trait(&storage, range, NSFontTraitMask::BoldFontMask),
@@ -1664,11 +1696,22 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
     for range in hidden_syntax(&source, active.as_ref()) {
         conceal(&storage, utf16_range(&source, range), false);
     }
-    for block in &blocks {
+    for (index, block) in blocks.iter().enumerate() {
         let paragraph = NSMutableParagraphStyle::new();
         paragraph.setFirstLineHeadIndent(block.indent);
         paragraph.setHeadIndent(block.indent);
-        paragraph.setMinimumLineHeight(24.0);
+        paragraph.setMinimumLineHeight(NOTE_LINE_HEIGHT);
+        if block.is_list {
+            // Only reserve space when another item follows. Keeping it after
+            // the paragraph also keeps custom markers on the first text row.
+            if blocks.get(index + 1).is_some_and(|next| {
+                next.is_list && next.bytes.start == block.bytes.end
+            }) {
+                paragraph.setParagraphSpacing(NOTE_LIST_SPACING);
+            }
+        } else {
+            paragraph.setParagraphSpacing(NOTE_PARAGRAPH_SPACING);
+        }
         storage.addAttribute_value_range(
             NSParagraphStyleAttributeName,
             &paragraph,
@@ -2003,8 +2046,13 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 if let Some(frame) =
                     layout_fragment_rect(text, selection.location.saturating_sub(1))
                 {
+                    // A heading fragment includes its 24pt space-before.
+                    // Place the placeholder on the text row with the caret.
+                    let line_inset = layout_fragment(text, selection.location.saturating_sub(1))
+                        .and_then(|fragment| fragment.textLineFragments().firstObject())
+                        .map_or(0.0, |line| line.typographicBounds().origin.y);
                     let allocated = HeadingPlaceholder::alloc(mtm).set_ivars(());
-                    let label: Retained<HeadingPlaceholder> = msg_send![super(allocated), initWithFrame:NSRect::new(NSPoint::new(EDITOR_INSET + LINE_PADDING, frame.origin.y), NSSize::new(240.0, heading_size(level) + 10.0))];
+                    let label: Retained<HeadingPlaceholder> = msg_send![super(allocated), initWithFrame:NSRect::new(NSPoint::new(EDITOR_INSET + LINE_PADDING, frame.origin.y + line_inset), NSSize::new(240.0, heading_size(level) + 10.0))];
                     label.setStringValue(&NSString::from_str(&format!("제목 {level}")));
                     label.setFont(Some(&crate::font::bold(heading_size(level))));
                     label.setTextColor(Some(&NSColor::placeholderTextColor()));
@@ -2593,7 +2641,10 @@ unsafe fn style_table_anchor(
     paragraph.setMaximumLineHeight(0.01);
     let bottom_padding = if handle_room > 0.0 { 2.0 } else { 6.0 };
     paragraph.setParagraphSpacing(
-        table.height() + TABLE_TOP_PADDING + (handle_room + bottom_padding - caret_inset).max(0.0),
+        // The 26pt EOF line is taller than the 24pt handle/padding area.
+        // Subtract its full inset from the reservation so the first typed
+        // character stays at the same height as the previously empty caret.
+        (table.height() + TABLE_TOP_PADDING + handle_room + bottom_padding - caret_inset).max(0.0),
     );
     storage.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, table.anchor(source));
 }
