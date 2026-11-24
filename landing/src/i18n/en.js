@@ -140,6 +140,12 @@ export default {
     body: 'You already pay for AI. Use it to study.',
     cta: 'Download for Mac',
     discord: 'Talk to us on Discord',
+    video: {
+      label: '35-second intro · in Korean',
+      aria: 'Stology intro video, in Korean. Connecting your existing Claude or ChatGPT account, files kept on your computer, notes, diagrams, PDF annotation, AI questions, and a concept map, all coming together in one window',
+      pause: 'Pause video', play: 'Play video',
+      soundOn: 'Sound on', soundOff: 'Sound off',
+    },
   },
   footer: { tagline: 'What you learn, yours to keep.', release: 'Release notes', discord: 'Discord', data: 'Data notice', copyright: 'Stology' },
   dataDialog: {

@@ -55,11 +55,11 @@ VITE_SITE_URL=https://example.com VITE_UMAMI_ID=xxxx npm run build --prefix land
 | [qa/](qa/) | 브라우저 검증 스크립트와 화면 |
 | [REFERENCE-NOTES.md](REFERENCE-NOTES.md) | 레퍼런스 관찰과 적용 원칙 |
 
-한국어 문구는 `humanize-korean` 윤문을 한 번 거쳤다(2026-11-24, 변경률 0.1%). 런타임 UI 프레임워크 없이 Vite로 묶은 HTML·CSS·JavaScript다. 히어로와 06 과목 지도의 지도 부분은 Canvas 2D, 나머지 기능 시연은 DOM/CSS다. 외부 라이브러리·WebGL·영상 파일을 쓰지 않는다.
+한국어 문구는 `humanize-korean` 윤문을 한 번 거쳤다(2026-11-24, 변경률 0.1%). 런타임 UI 프레임워크 없이 Vite로 묶은 HTML·CSS·JavaScript다. 히어로와 06 과목 지도의 지도 부분은 Canvas 2D, 나머지 기능 시연은 DOM/CSS다. 외부 라이브러리·WebGL은 쓰지 않는다. 영상 파일은 마무리 섹션의 소개 영상 하나뿐이다([ADR-041](../decisions/2026-11-24/ADR-041-landing-closing-intro-video.md)).
 
 ### 페이지 순서
 
-히어로(은하수 고정, 신뢰 사실 네 개) → 01 한 화면(앱 창 전체 20초 루프: PDF 열기 → 형광펜 → AI 질문 ⌘↩ → 노트로 정리) → 02 지금은(중립 창 세 개가 하나로 합쳐지는 문제 제기) → 03 세 가지 약속 → 04 노트(핵심 6 · 모두 16) → 05 PDF 필기(핵심 5 · 모두 13) → 06 과목 지도(지식지도 조작 장면, 약 23초 반복) → 07 시작하기 세 단계 → 08 FAQ → 마무리 → 푸터(릴리스 노트·Discord·데이터 안내). 가격·요금제는 적지 않는다(사용자 결정).
+히어로(은하수 고정, 신뢰 사실 네 개) → 01 한 화면(앱 창 전체 20초 루프: PDF 열기 → 형광펜 → AI 질문 ⌘↩ → 노트로 정리) → 02 지금은(중립 창 세 개가 하나로 합쳐지는 문제 제기) → 03 세 가지 약속 → 04 노트(핵심 6 · 모두 16) → 05 PDF 필기(핵심 5 · 모두 13) → 06 과목 지도(지식지도 조작 장면, 약 23초 반복) → 07 시작하기 세 단계 → 08 FAQ → 마무리(35초 소개 영상 · 문구 · 다운로드) → 푸터(릴리스 노트·Discord·데이터 안내). 가격·요금제는 적지 않는다(사용자 결정).
 
 ### 기능 시연 장면
 
@@ -76,22 +76,26 @@ VITE_SITE_URL=https://example.com VITE_UMAMI_ID=xxxx npm run build --prefix land
 - 앱은 선택한 개념 주변을 지금 카메라 쪽으로 펼치므로 각도에 따라 가까운 구체가 이웃을 가린다. 장면은 개념을 열기 전 끄는 거리(`ATLAS_DRAGS`)를 [구도 검사](qa/atlas-composition.mjs)로 골랐다. 데이터나 순서를 바꾸면 `node landing/qa/atlas-composition.mjs --scan`으로 다시 고른다.
 - 동작 줄이기에서는 마지막 상태(제2정규형 선택)와 Enter 키캡을 고정해 보여 준다.
 
+### 마무리 소개 영상
+
+마무리 섹션 맨 위에 35초 소개 영상(`public/media/intro/stology-intro-ko.mp4`, 1080p·60fps·H.264, 7.3 MB, 소리 있음)을 둔다. 포스터는 25초 지점 '전부, 한 화면에서' 장면(`poster.jpg`)이다. 섹션이 900px 안으로 다가오면 영상을 받고, 35% 이상 보이는 동안만 소리 없이 반복 재생하며 벗어나면 멈춘다. 오른쪽 아래 버튼으로 일시정지·재생과 소리 켜기·끄기를 하고, 처음 소리를 켜면 처음부터 재생한다. 동작 줄이기에서는 누르기 전까지 영상을 받지 않고 포스터만 보인다. 영상 속 문구가 한국어라 영어 페이지는 캡션에 'in Korean'을 밝힌다. 예전 S 로고와 별 중 별은 영상 카드의 오른쪽 위 모서리에 남겼다.
+
 ### 한국어·영어
 
 언어별로 URL을 나눈다(`/`, `/en/`). 헤더의 `KO · EN`은 다른 언어 페이지로 가는 링크이며 현재 해시를 유지한다. 자동 리디렉션은 하지 않는다. `VITE_SITE_URL`이 있을 때 두 페이지가 서로를 hreflang으로 가리키고 `x-default`는 한국어다. 영어 페이지는 요구 사항 줄과 FAQ에 인터페이스가 아직 한국어임을 밝힌다.
 
 ### 측정
 
-`src/analytics.js`의 `track(name, props)`는 Umami가 없으면 아무 일도 하지 않는다. 이벤트: `download_click{place}`, `lang_switch{to}`, `scene_select{id, section}`, `scene_view_all{section, mode}`, `faq_open{id}`, `data_notice_open`, `outbound{place}`. 보조 지표로 GitHub 릴리스 자산의 `download_count`를 주 1회 적는다. 푸터의 데이터 안내가 사이트와 앱의 전송 범위를 한 문장씩 설명한다.
+`src/analytics.js`의 `track(name, props)`는 Umami가 없으면 아무 일도 하지 않는다. 이벤트: `download_click{place}`, `lang_switch{to}`, `scene_select{id, section}`, `scene_view_all{section, mode}`, `faq_open{id}`, `data_notice_open`, `outbound{place}`, `intro_video{action: play|pause|sound_on|sound_off}`. 보조 지표로 GitHub 릴리스 자산의 `download_count`를 주 1회 적는다. 푸터의 데이터 안내가 사이트와 앱의 전송 범위를 한 문장씩 설명한다.
 
 ## 검사와 검증
 
-`npm run check --prefix landing`은 항목 수(16·13), 핵심 수(6·5), id 중복, 장면 함수 존재, 한·영 문구 누락, FAQ의 가격 표현, 선택 구절이 본문에 있는지, 단축키가 앱 문서에 있는지, 지도 장면의 영어 번역표가 개념·단원·자료 이름과 장면 문구를 모두 덮는지, 지도 검색어의 첫 결과가 장면이 여는 개념인지를 검사한다. 영상 검사는 없다. 정적 검사 통과가 화면의 시각 검증을 대신하지 않는다.
+`npm run check --prefix landing`은 항목 수(16·13), 핵심 수(6·5), id 중복, 장면 함수 존재, 한·영 문구 누락, FAQ의 가격 표현, 선택 구절이 본문에 있는지, 단축키가 앱 문서에 있는지, 지도 장면의 영어 번역표가 개념·단원·자료 이름과 장면 문구를 모두 덮는지, 지도 검색어의 첫 결과가 장면이 여는 개념인지를 검사한다. 영상은 정적 검사에 넣지 않는다. 정적 검사 통과가 화면의 시각 검증을 대신하지 않는다.
 
-브라우저 검증은 Aside REPL 스크립트 [qa/rebuild-check-desktop.js](qa/rebuild-check-desktop.js)(데스크톱 1440×900, 한국어)와 [qa/rebuild-check-mobile-en.js](qa/rebuild-check-mobile-en.js)(모바일 390, 영어, 동작 줄이기)로 하며, 결과는 [실행 기록](../app/qa/runs/landing-rebuild-2026-11-23.md)에 남긴다. 06 과목 지도 장면은 [qa/atlas-check.js](qa/atlas-check.js)(한국어·영어·동작 줄이기)와 [구도 검사](qa/atlas-composition.mjs)로 확인하고 [지도 장면 기록](../app/qa/runs/landing-atlas-2026-11-24.md)에 남겼다. 2026-11-22까지의 녹화 기반 검증 기록([실제 녹화 전환](../app/qa/runs/landing-recorded-2026-11-17.md) 등)과 히어로 검증([은하수 히어로](../app/qa/runs/landing-hero-galaxy-2026-11-22.md))은 이력이다. 히어로 코드는 이번 재구축에서 바꾸지 않았다.
+브라우저 검증은 Aside REPL 스크립트 [qa/rebuild-check-desktop.js](qa/rebuild-check-desktop.js)(데스크톱 1440×900, 한국어)와 [qa/rebuild-check-mobile-en.js](qa/rebuild-check-mobile-en.js)(모바일 390, 영어, 동작 줄이기)로 하며, 결과는 [실행 기록](../app/qa/runs/landing-rebuild-2026-11-23.md)에 남긴다. 06 과목 지도 장면은 [qa/atlas-check.js](qa/atlas-check.js)(한국어·영어·동작 줄이기)와 [구도 검사](qa/atlas-composition.mjs)로 확인하고 [지도 장면 기록](../app/qa/runs/landing-atlas-2026-11-24.md)에 남겼다. 마무리 소개 영상은 [qa/closing-video-check.js](qa/closing-video-check.js)로 확인하고 [소개 영상 기록](../app/qa/runs/landing-closing-video-2026-11-24.md)에 남겼다. 2026-11-22까지의 녹화 기반 검증 기록([실제 녹화 전환](../app/qa/runs/landing-recorded-2026-11-17.md) 등)과 히어로 검증([은하수 히어로](../app/qa/runs/landing-hero-galaxy-2026-11-22.md))은 이력이다. 히어로 코드는 이번 재구축에서 바꾸지 않았다.
 
 ## 결정 기록
 
-정적 사이트 선택은 [ADR-023](../decisions/2026-11-17/ADR-023-korean-product-landing.md), 이전 모션·녹화 방식은 [ADR-024](../decisions/2026-11-17/ADR-024-feature-motion-catalog.md)·[ADR-025](../decisions/2026-11-17/ADR-025-passive-native-demos.md), 히어로는 [ADR-031](../decisions/2026-11-22/ADR-031-landing-hero-icon-ribbon-and-star-sprites.md)·[ADR-032](../decisions/2026-11-22/ADR-032-landing-hero-galaxy-stream-and-single-star.md)·[ADR-033](../decisions/2026-11-22/ADR-033-landing-hero-sky-behind-copy-and-free-star.md), 실제 UI 재현 장면·키캡 토스트·언어별 URL은 [ADR-039](../decisions/2026-11-23/ADR-039-landing-dom-scenes-key-toasts-and-locale-urls.md), 과목 지도의 Canvas 2D 조작 장면은 [ADR-040](../decisions/2026-11-24/ADR-040-landing-course-map-canvas-scene.md)에 있다. 녹화 자산의 처리는 [미디어 기록](public/media/README.md)을 본다.
+정적 사이트 선택은 [ADR-023](../decisions/2026-11-17/ADR-023-korean-product-landing.md), 이전 모션·녹화 방식은 [ADR-024](../decisions/2026-11-17/ADR-024-feature-motion-catalog.md)·[ADR-025](../decisions/2026-11-17/ADR-025-passive-native-demos.md), 히어로는 [ADR-031](../decisions/2026-11-22/ADR-031-landing-hero-icon-ribbon-and-star-sprites.md)·[ADR-032](../decisions/2026-11-22/ADR-032-landing-hero-galaxy-stream-and-single-star.md)·[ADR-033](../decisions/2026-11-22/ADR-033-landing-hero-sky-behind-copy-and-free-star.md), 실제 UI 재현 장면·키캡 토스트·언어별 URL은 [ADR-039](../decisions/2026-11-23/ADR-039-landing-dom-scenes-key-toasts-and-locale-urls.md), 과목 지도의 Canvas 2D 조작 장면은 [ADR-040](../decisions/2026-11-24/ADR-040-landing-course-map-canvas-scene.md), 마무리 소개 영상은 [ADR-041](../decisions/2026-11-24/ADR-041-landing-closing-intro-video.md)에 있다. 녹화 자산의 처리는 [미디어 기록](public/media/README.md)을 본다.
 
 랜딩 코드만 수정할 때는 Mac 앱 테스트·재설치가 필요하지 않다. 앱 코드를 함께 수정했다면 저장소 [작업 규칙](../AGENTS.md)을 따른다.

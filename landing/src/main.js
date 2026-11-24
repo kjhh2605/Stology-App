@@ -31,6 +31,7 @@ const icon = (name) => {
   };
   return `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="${paths[name] || paths.note}" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 };
+const soundIcon = on => `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>${on ? '<path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>' : '<path d="M16 9.5l5 5m0-5l-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>'}</svg>`;
 const downloadLink = (place, cls = 'button button-primary') => `<a class="${cls}" href="${DOWNLOAD_URL}" download data-track="download_click:${place}">${esc(S.nav.download)} ${downloadIcon}</a>`;
 const discordLink = (label, place, cls = 'discord-link') => `<a class="${cls}" href="${DISCORD_URL}" target="_blank" rel="noopener" aria-label="${esc(S.discordUrlLabel)}" data-track="outbound:discord-${place}">${discordIcon}<span>${esc(label)}</span></a>`;
 const heading = (sec, extra = '') => `<div class="section-heading reveal"><div><p class="section-index">${sec.index} <span>/</span> ${esc(sec.label)}</p><h2>${sec.title}</h2></div><p>${esc(sec.body || '')}${extra}</p></div>`;
@@ -79,7 +80,7 @@ document.querySelector('#app').innerHTML = `
 
 <section id="faq" class="faq-section container section"><div><p class="section-index">${S.faq.index} <span>/</span> ${esc(S.faq.label)}</p><h2>${S.faq.title}</h2></div><div class="faq-list">${S.faq.items.map(item => `<details${item.id ? ` id="faq-${item.id}"` : ''}><summary>${esc(item.q)}<span>+</span></summary><p>${esc(item.a)}</p>${item.discord ? discordLink('Discord', 'faq') : ''}</details>`).join('')}</div></section>
 
-<section class="closing container"><div class="closing-orbit" aria-hidden="true"></div><div class="closing-mark" aria-hidden="true"><img src="/mark.png" alt="" width="64" height="64"><img class="closing-star" src="/media/hero/star.webp" alt="" width="46" height="46" loading="lazy"></div><p class="section-index">${esc(S.closing.index)}</p><h2>${esc(S.closing.title)}</h2><p>${esc(S.closing.body)}</p><div class="closing-links">${downloadLink('closing')}${discordLink(S.closing.discord, 'closing')}</div></section>
+<section class="closing container"><div class="closing-orbit" aria-hidden="true"></div><figure class="closing-film reveal"><div class="film-frame"><video class="film-video" muted loop playsinline preload="none" poster="/media/intro/poster.jpg" data-src="/media/intro/stology-intro-ko.mp4" aria-label="${esc(S.closing.video.aria)}"></video><div class="film-controls"><button type="button" class="film-btn film-play" aria-label="${esc(S.closing.video.play)}">▷</button><button type="button" class="film-btn film-sound" aria-pressed="false">${soundIcon(false)}<span>${esc(S.closing.video.soundOn)}</span></button></div></div><img class="closing-star" src="/media/hero/star.webp" alt="" width="54" height="54" loading="lazy" aria-hidden="true"><figcaption><span class="status-light"></span>${esc(S.closing.video.label)}</figcaption></figure><p class="section-index">${esc(S.closing.index)}</p><h2>${esc(S.closing.title)}</h2><p>${esc(S.closing.body)}</p><div class="closing-links">${downloadLink('closing')}${discordLink(S.closing.discord, 'closing')}</div></section>
 </main>
 <footer class="container"><a class="brand" href="${S.path}"><img src="/mark.png" alt="" width="26" height="26"><span>stology.</span></a><span>${esc(S.footer.tagline)}</span><div><div class="foot-links"><a href="${RELEASES_URL}" target="_blank" rel="noopener" data-track="outbound:release-notes">${esc(S.footer.release)}</a><a href="${DISCORD_URL}" target="_blank" rel="noopener" data-track="outbound:discord-footer">${discordIcon}${esc(S.footer.discord)}</a><button data-open-info>${esc(S.footer.data)}</button></div><small>© ${new Date().getFullYear()} ${esc(S.footer.copyright)}</small></div></footer>
 <dialog id="data-dialog" aria-labelledby="dialog-title"><button class="dialog-close" aria-label="${esc(S.dataDialog.close)}">×</button><img src="/mark.png" alt="" width="40" height="40"><p class="section-index">STOLOGY</p><h2 id="dialog-title">${esc(S.dataDialog.title)}</h2><p>${esc(S.dataDialog.p1)}</p><p>${esc(S.dataDialog.p2)}</p></dialog>`;
@@ -109,6 +110,35 @@ document.querySelectorAll('.reveal').forEach(el => revealObserver.observe(el));
 const problemStage = document.querySelector('.problem-stage');
 const problemObserver = new IntersectionObserver(entries => { entries.forEach(entry => { if (!entry.isIntersecting) return; problemObserver.disconnect(); problemStage.classList.add('visible'); setTimeout(() => problemStage.classList.add('merged'), reduceMotion.matches ? 0 : 1500); }); }, { threshold: .35 });
 problemObserver.observe(problemStage);
+
+/* ---------- 마무리 소개 영상: 가까워지면 받고, 보이는 동안만 소리 없이 반복 ---------- */
+const film = document.querySelector('.closing-film');
+const filmVideo = film.querySelector('.film-video');
+const filmPlay = film.querySelector('.film-play');
+const filmSound = film.querySelector('.film-sound');
+let filmInView = false, filmUserPaused = reduceMotion.matches, filmHeardFromStart = false;
+const filmLoad = () => { if (filmVideo.src) return; filmVideo.preload = 'auto'; filmVideo.src = filmVideo.dataset.src; };
+const filmSync = () => { if (filmInView && !filmUserPaused) { filmLoad(); filmVideo.play().catch(() => {}); } else filmVideo.pause(); };
+const filmLabel = () => { const paused = filmVideo.paused; filmPlay.textContent = paused ? '▷' : 'Ⅱ'; filmPlay.setAttribute('aria-label', paused ? S.closing.video.play : S.closing.video.pause); };
+filmVideo.addEventListener('play', filmLabel); filmVideo.addEventListener('pause', filmLabel);
+const filmToggle = () => { filmUserPaused = !filmVideo.paused; filmSync(); track('intro_video', { action: filmUserPaused ? 'pause' : 'play' }); };
+filmPlay.addEventListener('click', filmToggle);
+filmVideo.addEventListener('click', filmToggle);
+filmSound.addEventListener('click', () => {
+  const on = filmVideo.muted;
+  filmVideo.muted = !on;
+  // 처음 소리를 켜면 처음부터 들려준다
+  if (on && !filmHeardFromStart) { filmHeardFromStart = true; filmLoad(); filmVideo.currentTime = 0; }
+  if (on) filmUserPaused = false;
+  filmSync();
+  filmSound.setAttribute('aria-pressed', String(on));
+  filmSound.innerHTML = `${soundIcon(on)}<span>${esc(on ? S.closing.video.soundOff : S.closing.video.soundOn)}</span>`;
+  track('intro_video', { action: on ? 'sound_on' : 'sound_off' });
+});
+reduceMotion.addEventListener('change', () => { if (reduceMotion.matches) { filmUserPaused = true; filmSync(); } });
+// 동작 줄이기에서는 누르기 전까지 영상을 받지 않고 포스터만 보인다
+new IntersectionObserver(entries => { if (!reduceMotion.matches && entries.some(e => e.isIntersecting)) filmLoad(); }, { rootMargin: '900px 0px' }).observe(film);
+new IntersectionObserver(entries => { filmInView = entries[0].isIntersecting; filmSync(); }, { threshold: .35 }).observe(filmVideo);
 
 /* ---------- 대화상자 · FAQ 연결 ---------- */
 const dialog = document.querySelector('#data-dialog');

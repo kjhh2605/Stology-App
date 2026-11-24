@@ -139,6 +139,12 @@ export default {
     body: '결제해 둔 AI, 이제 공부에 쓰세요.',
     cta: 'Mac용 다운로드',
     discord: 'Discord에서 이야기해요',
+    video: {
+      label: '35초 소개 영상',
+      aria: 'Stology 소개 영상. 쓰던 Claude·ChatGPT 계정 연결, 내 컴퓨터에 남는 자료, 노트·다이어그램·PDF 필기·AI 질문, 개념별로 정리된 지도가 한 화면에 모이는 모습',
+      pause: '영상 일시정지', play: '영상 재생',
+      soundOn: '소리 켜기', soundOff: '소리 끄기',
+    },
   },
   footer: { tagline: '배운 것을, 나의 것으로.', release: '릴리스 노트', discord: 'Discord', data: '데이터 안내', copyright: 'Stology' },
   dataDialog: {
