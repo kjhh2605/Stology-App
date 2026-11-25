@@ -3,13 +3,25 @@
     <channel>
         <title>Stology Local</title>
         <item>
+            <title>0.1.2</title>
+            <pubDate>Wed, 25 Nov 2026 19:05:55 +0900</pubDate>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.2/Stology-Local-0.1.2-arm64.dmg" length="12085610" type="application/octet-stream" sparkle:edSignature="F6uAoOczhVivz5QkBLtS/yPZnITCIdWKENP989zIgxnd9vUpJRXb1ja6RSM5p8G2D8N2Hu1K+r1pz3Nni3uQBg=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.2/Stology%20Local3-2.delta" sparkle:deltaFrom="2" length="179758" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="gbw0aPz3B/4E28wMFF19P8uvUofgRRWmicm+F3ap5wCJH/nIjjoX2vwC+vIYE7JmbcMZqiSfkH4tj5x7vk/FAw=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>0.1.1</title>
             <pubDate>Wed, 25 Nov 2026 18:23:28 +0900</pubDate>
             <sparkle:version>2</sparkle:version>
             <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.1/Stology-Local-0.1.1-arm64.dmg" length="14281323" type="application/octet-stream" sparkle:edSignature="5EiXPHptL5PrENVxpeu9YiuTqL0vgelV2/JY7StjChJZ4geq7uBU8FMkrYPL9FEZEKu2mmXXz75Fr2KnZK1SBw=="/>
+            <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.2/Stology-Local-0.1.1-arm64.dmg" length="14281323" type="application/octet-stream" sparkle:edSignature="5EiXPHptL5PrENVxpeu9YiuTqL0vgelV2/JY7StjChJZ4geq7uBU8FMkrYPL9FEZEKu2mmXXz75Fr2KnZK1SBw=="/>
         </item>
     </channel>
 </rss>

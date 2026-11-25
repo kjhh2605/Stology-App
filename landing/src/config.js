@@ -5,7 +5,7 @@ export const UMAMI_ID = import.meta.env.VITE_UMAMI_ID || '';
 export const UMAMI_SRC = import.meta.env.VITE_UMAMI_SRC || 'https://cloud.umami.is/script.js';
 
 // 버전을 올릴 때 app/scripts/release.sh가 만든 GitHub 릴리스 주소로 바꾼다.
-export const DOWNLOAD_VERSION = '0.1.1';
+export const DOWNLOAD_VERSION = '0.1.2';
 export const DOWNLOAD_URL = `https://github.com/kjhh2605/Stology-App/releases/download/v${DOWNLOAD_VERSION}/Stology-Local-${DOWNLOAD_VERSION}-arm64.dmg`;
 export const RELEASES_URL = 'https://github.com/kjhh2605/Stology-App/releases';
 export const DISCORD_URL = 'https://discord.gg/SJ6cGyjEF';
