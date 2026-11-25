@@ -311,6 +311,13 @@ pub(crate) fn insert(c: &Connection, d: &Doc) -> Result<()> {
     c.execute("INSERT INTO documents(id,workspace_id,title,path,kind,version,hash,body) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![d.id,d.workspace_id,d.title,d.path,d.kind,d.version,d.hash,d.body])?;
     Ok(())
 }
+// SQLite CURRENT_TIMESTAMP is UTC; show it in local time.
+fn modified_label(updated_at: &str) -> String {
+    use chrono::TimeZone;
+    chrono::NaiveDateTime::parse_from_str(updated_at, "%Y-%m-%d %H:%M:%S")
+        .map(|utc| chrono::Local.from_utc_datetime(&utc).format("%Y.%m.%d %H:%M").to_string())
+        .unwrap_or_default()
+}
 fn list_docs(c: &Connection, w: &str, drafts: bool) -> Result<Vec<Doc>> {
     let mut s=c.prepare("SELECT id FROM documents WHERE workspace_id=?1 AND deleted=0 AND ((?2=1 AND kind='draft') OR (?2=0 AND kind<>'draft')) ORDER BY updated_at DESC,id")?;
     let ids = s
@@ -790,7 +797,10 @@ pub fn handle(root: &Path, request: &Value) -> Result<Value> {
                     continue;
                 }
                 a.push(if op == "draft.list" {
-                    value(root, &tx, &d)?
+                    let mut v = value(root, &tx, &d)?;
+                    let updated: String = tx.query_row("SELECT updated_at FROM documents WHERE id=?1", [&d.id], |r| r.get(0))?;
+                    v["updated_label"] = json!(modified_label(&updated));
+                    v
                 } else {
                     metadata(root, &tx, &d)?
                 });
@@ -1148,6 +1158,13 @@ mod tests {
     use super::*;
     fn call(root: &Path, v: Value) -> Value {
         handle(root, &v).unwrap()
+    }
+    #[test]
+    fn modified_label_uses_local_date_and_time() {
+        use chrono::{Local, TimeZone};
+        let utc = Local.with_ymd_and_hms(2026, 11, 16, 14, 49, 0).unwrap().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+        assert_eq!(modified_label(&utc), "2026.11.16 14:49");
+        assert_eq!(modified_label("bad"), "");
     }
     fn ws(root: &Path) -> String {
         call(root, json!({"op":"workspace.create","name":"생물학"}))["id"]

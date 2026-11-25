@@ -235,6 +235,52 @@ impl WorkspaceRow {
         outline.removeFromSuperview();
     }
 }
+// Decoration over a row button; clicks and right clicks fall through to the row.
+define_class!(
+    #[unsafe(super(NSTextField))]
+    #[name="StologyPassthroughLabel"]
+    #[thread_kind=MainThreadOnly]
+    pub(crate) struct PassthroughLabel;
+    unsafe impl NSObjectProtocol for PassthroughLabel {}
+    impl PassthroughLabel {
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> { None }
+    }
+);
+/// Right-aligned last-modified label inside a draft row. A long title is
+/// truncated before the label instead of running under it.
+pub(crate) unsafe fn add_row_date(row: &NSButton, text: &str) {
+    if text.is_empty() { return; }
+    let label: Retained<PassthroughLabel> = msg_send![PassthroughLabel::alloc(mtm()), initWithFrame: NSRect::ZERO];
+    label.setStringValue(&NSString::from_str(text));
+    label.setEditable(false);
+    label.setSelectable(false);
+    label.setBordered(false);
+    label.setDrawsBackground(false);
+    label.setFont(Some(&crate::font::regular(11.)));
+    label.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(0.36, 0.38, 0.52, 0.85)));
+    label.setAlignment(NSTextAlignment::Right);
+    let width = label.intrinsicContentSize().width.ceil() + 4.;
+    let bounds = row.bounds();
+    let height = label.intrinsicContentSize().height.ceil();
+    label.setFrame(rect(bounds.size.width - width - 8., ((bounds.size.height - height) / 2.).floor(), width, height));
+    label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+    // The title cell hugs its text, so trim only the part that reaches the date.
+    if let Some(cell) = row.cell() {
+        let title_rect: NSRect = msg_send![&cell, titleRectForBounds: bounds];
+        let overlap = title_rect.origin.x + title_rect.size.width - (bounds.size.width - width - 14.);
+        if overlap > 0. {
+            let title = NSMutableAttributedString::initWithAttributedString(NSMutableAttributedString::alloc(), &row.attributedTitle());
+            let paragraph = NSMutableParagraphStyle::new();
+            paragraph.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            paragraph.setTailIndent(-overlap);
+            title.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, NSRange::new(0, title.length()));
+            row.setAttributedTitle(&title);
+        }
+    }
+    let _: () = msg_send![row, setAccessibilityHelp: &*NSString::from_str(&format!("마지막 수정 {text}"))];
+    row.addSubview(&label);
+}
 struct RowState {
     outlined: Cell<bool>,
     active: Cell<bool>,

@@ -1865,6 +1865,7 @@ impl State {
                             .as_ref()
                             .is_some_and(|current| current["id"] == d["id"]),
                     );
+                    document_tree::add_row_date(&row, d["updated_label"].as_str().unwrap_or(""));
                     let menu = NSMenu::new(mtm());
                     let title = NSString::from_str("삭제");
                     let item = NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm()), &title, Some(sel!(action:)), &NSString::from_str(""));
