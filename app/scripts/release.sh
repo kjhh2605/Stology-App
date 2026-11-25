@@ -51,8 +51,6 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 ditto "$APP" "$STAGE/Stology Local.app"
 ln -s /Applications "$STAGE/Applications"
-cp "$ROOT/docs/PACKAGE-START.md" "$STAGE/시작하기.md"
-cp -R "$ROOT/guide" "$STAGE/가이드북"
 rm -f "$DMG"
 hdiutil create -volname 'Stology Local' -srcfolder "$STAGE" -format UDZO "$DMG"
 codesign --sign "$ID" --timestamp "$DMG"

@@ -3,7 +3,6 @@
 개인 자료를 Markdown으로 저장하고, 원본 자료를 구독 공급자로 분석해 개념·관계·근거를 탐색하는 Apple Silicon Mac 앱이다.
 
 - 빌드 산출물: `dist/Stology Local.app`, 설치 이미지: `dist/Stology-Local-arm64.dmg`
-- 오프라인 가이드: [guide/index.html](guide/index.html)
 - 제품 정책: [docs/product-policy.md](docs/product-policy.md)
 - 단축키와 Markdown 입력: [docs/keyboard-shortcuts.md](docs/keyboard-shortcuts.md)
 - 노트 이미지·다이어그램: [docs/note-images.md](docs/note-images.md)

@@ -27,9 +27,6 @@ AGENTS.md
 /app/docs/provider-evidence.md
 /app/qa/*
 !/app/qa/fixtures/
-/app/guide/assets/graph-parity.html
-/app/guide/assets/installed-app-2026-11-14.html
-/app/guide/assets/pdf-annotation-implementation.html
 /landing/REFERENCE-NOTES.md
 /landing/qa/*.png
 /landing/qa/*-results.json

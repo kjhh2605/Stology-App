@@ -7,10 +7,9 @@ from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 SKIP = {'.git', 'target', 'dist', '.build', 'node_modules', 'private'}
-# These are fixture content, DMG-relative instructions, and a verbatim vendor license.
+# These are fixture content and a verbatim vendor license.
 SKIP_FILES = {
     'app/bench/fixture.md',
-    'app/docs/PACKAGE-START.md',
     'app/docs/third-party/onig_sys-69.9.3-LICENSE.md',
 }
 LINK = re.compile(r'\]\((<[^>]+>|[^\s)]+)(?:\s+"[^"]*")?\)')

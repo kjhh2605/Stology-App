@@ -264,8 +264,6 @@ define_class!(
             if text.as_ref().is_some_and(|text| editor::add_link(text)) { return; }
             STATE.with(|s|if let Ok(mut s)=s.try_borrow_mut(){if let Some(s)=s.as_mut(){if let Some(field)=&s.search{s._window.makeFirstResponder(Some(field));field.selectText(None);}}});
         }}
-        #[unsafe(method(showGuide:))]
-        fn show_guide(&self,_sender:Option<&AnyObject>){unsafe{let bundled=std::env::current_exe().ok().and_then(|p|p.parent().and_then(|p|p.parent()).map(|p|p.join("Resources/guide/index.html")));let path=bundled.filter(|p|p.is_file()).or_else(||std::env::current_dir().ok().map(|p|p.join("local-app/guide/index.html")).filter(|p|p.is_file()));if let Some(p)=path{let url=NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()));if !NSWorkspace::sharedWorkspace().openURL(&url){alert("가이드북을 열 수 없습니다","기본 브라우저 설정을 확인해 주세요.");}}else{alert("가이드북을 찾을 수 없습니다","설치 이미지의 가이드북 폴더에서 index.html을 열 수 있습니다.");}}}
         #[unsafe(method(animateSidebar:))]
         fn animate_sidebar(&self, _timer: &NSTimer) {
             STATE.with(|s| if let Ok(mut s) = s.try_borrow_mut() {
@@ -5608,14 +5606,6 @@ unsafe fn menu(app: &NSApplication, target: &Delegate, updater: Option<&AnyObjec
     let help_item = NSMenuItem::new(mtm());
     help_item.setTitle(&NSString::from_str("도움말"));
     let help = NSMenu::new(mtm());
-    let guide = NSMenuItem::initWithTitle_action_keyEquivalent(
-        NSMenuItem::alloc(mtm()),
-        &NSString::from_str("오프라인 가이드북"),
-        Some(sel!(showGuide:)),
-        &NSString::from_str(""),
-    );
-    guide.setTarget(Some(target));
-    help.addItem(&guide);
     help_item.setSubmenu(Some(&help));
     main.addItem(&help_item);
     app.setHelpMenu(Some(&help));

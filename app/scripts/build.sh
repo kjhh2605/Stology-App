@@ -25,6 +25,7 @@ export MACOSX_DEPLOYMENT_TARGET=14.0
 if [[ "$(uname -m)" != arm64 ]]; then echo 'Apple Silicon Mac이 필요합니다.' >&2; exit 1; fi
 cargo build --locked --release --manifest-path "$ROOT/core/Cargo.toml"
 cargo build --locked --release --manifest-path "$ROOT/ui/Cargo.toml"
+rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/assets/StologyLocal.icns" "$APP/Contents/Resources/"
 mkdir -p "$APP/Contents/Resources/fonts"
@@ -32,8 +33,6 @@ cp "$ROOT/assets/fonts/"*.otf "$APP/Contents/Resources/fonts/"
 cp "$ROOT/core/target/release/stology-core" "$APP/Contents/MacOS/"
 cp "$ROOT/ui/target/release/stology-local" "$APP/Contents/MacOS/"
 xcrun swiftc -O -target arm64-apple-macosx14.0 "$ROOT/native/Extraction.swift" -o "$APP/Contents/MacOS/stology-extract" -framework PDFKit -framework Vision -framework AppKit -framework ImageIO
-python3 "$ROOT/guide/build_appendices.py"
-cp -R "$ROOT/guide" "$APP/Contents/Resources/"
 cp -R "$ROOT/core/ai" "$APP/Contents/Resources/"
 python3 "$ROOT/scripts/third-party.py"
 mkdir -p "$APP/Contents/Resources/Licenses"
@@ -78,8 +77,6 @@ if [[ "$APP_ONLY" != true ]]; then
  trap 'rm -rf "$STAGE"' EXIT
  cp -R "$APP" "$STAGE/"
  ln -s /Applications "$STAGE/Applications"
- cp "$ROOT/docs/PACKAGE-START.md" "$STAGE/시작하기.md"
- cp -R "$ROOT/guide" "$STAGE/가이드북"
  hdiutil create -volname 'Stology Local' -srcfolder "$STAGE" -ov -format UDZO "$DIST/Stology-Local-arm64.dmg"
  (cd "$DIST" && shasum -a 256 Stology-Local-arm64.dmg > SHA256SUMS)
 fi
