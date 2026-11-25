@@ -33,7 +33,7 @@ pub mod diagram_paint;
 pub use image_edit::{set_image_importer, set_diagram_opener};
 use image_edit::{ImageState, InlineImage};
 
-// B spacing preset: shared by rendering and blank-row caret placement.
+// Approximate row pitch used for block hit testing.
 const NOTE_LINE_HEIGHT: f64 = 26.0;
 const NOTE_PARAGRAPH_SPACING: f64 = 10.0;
 const NOTE_LIST_SPACING: f64 = 4.0;
@@ -1146,7 +1146,7 @@ pub unsafe fn make_editor(frame: NSRect) -> (Retained<NSScrollView>, Retained<NS
     text.setAutomaticDataDetectionEnabled(false);
     text.setFont(Some(&crate::font::regular(16.0)));
     let paragraph = NSMutableParagraphStyle::new();
-    paragraph.setMinimumLineHeight(NOTE_LINE_HEIGHT);
+    paragraph.setLineSpacing(6.0);
     text.setDefaultParagraphStyle(Some(&paragraph));
     text.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
         0.09, 0.094, 0.149, 1.0,
@@ -1579,13 +1579,12 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
     }
     storage.addAttribute_value_range(NSFontAttributeName, &base, all);
     let paragraph = NSMutableParagraphStyle::new();
-    paragraph.setMinimumLineHeight(NOTE_LINE_HEIGHT);
+    paragraph.setLineSpacing(6.0);
     paragraph.setParagraphSpacing(NOTE_PARAGRAPH_SPACING);
     storage.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, all);
-    // Empty writing rows keep a 26pt pitch, including rows created by clicking
-    // below/beside an attachment. Do not add paragraph space to blank lines.
+    // Empty writing rows retain spacing without stretching the insertion cursor.
     let blank_paragraph = NSMutableParagraphStyle::new();
-    blank_paragraph.setMinimumLineHeight(NOTE_LINE_HEIGHT);
+    blank_paragraph.setParagraphSpacing(6.0);
     let mut offset = 0;
     for line in source.split_inclusive('\n') {
         if line.trim().is_empty() {
@@ -1620,7 +1619,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                     range,
                 );
                 let paragraph = NSMutableParagraphStyle::new();
-                paragraph.setMinimumLineHeight(size + 6.0);
+                paragraph.setLineSpacing(6.0);
                 paragraph.setParagraphSpacingBefore(if source[..span.bytes.start].trim().is_empty() {
                     0.0
                 } else {
@@ -1712,7 +1711,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
         let paragraph = NSMutableParagraphStyle::new();
         paragraph.setFirstLineHeadIndent(block.indent);
         paragraph.setHeadIndent(block.indent);
-        paragraph.setMinimumLineHeight(NOTE_LINE_HEIGHT);
+        paragraph.setLineSpacing(6.0);
         if block.is_list {
             // Only reserve space when another item follows. Keeping it after
             // the paragraph also keeps custom markers on the first text row.
