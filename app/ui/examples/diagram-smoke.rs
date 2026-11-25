@@ -1,7 +1,7 @@
 //! Exercise native tool actions, pointer events, label editing and SVG persistence.
 #![allow(dead_code, deprecated)]
 use objc2::{
-    class, define_class, msg_send,
+    define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, ProtocolObject, Sel},
     sel, MainThreadMarker, MainThreadOnly,
@@ -23,6 +23,10 @@ mod pdf_annotations {
 }
 #[path = "../src/diagram_canvas.rs"]
 mod diagram_canvas;
+#[path = "support/controls.rs"]
+#[allow(dead_code)]
+mod controls;
+use controls::{button, choose, key};
 fn mtm() -> MainThreadMarker {
     MainThreadMarker::new().unwrap()
 }
@@ -31,23 +35,6 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
 }
 unsafe fn view(frame: NSRect) -> Retained<NSView> {
     NSView::initWithFrame(NSView::alloc(mtm()), frame)
-}
-unsafe fn button(root: &NSView, tag: isize) -> Retained<NSButton> {
-    let view = root
-        .subviews()
-        .iter()
-        .find(|view| {
-            let yes: bool = msg_send![&**view,isKindOfClass:class!(NSButton)];
-            yes && {
-                let value: isize = msg_send![&**view, tag];
-                value == tag
-            }
-        })
-        .expect("tool button");
-    Retained::retain(&*view as *const NSView as *mut NSButton).unwrap()
-}
-unsafe fn choose(root: &NSView, tag: isize) {
-    button(root, tag).performClick(None);
 }
 unsafe fn find_view<T: objc2::ClassType + objc2::DowncastTarget>(root: &NSView, name: &str) -> Option<Retained<T>> {
     if root.accessibilityLabel().is_some_and(|v| v.to_string() == name) {
@@ -95,13 +82,6 @@ unsafe fn menu_item(tag: isize) -> Retained<NSMenuItem> {
 }
 unsafe fn item_title(menu: &NSMenu, index: isize) -> String {
     menu.itemAtIndex(index).unwrap().title().to_string()
-}
-unsafe fn key(window: &NSWindow, text: &str, keycode: u16) {
-    let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
-        NSEventType::KeyDown,NSPoint::new(0.,0.),NSEventModifierFlags::empty(),0.,window.windowNumber(),None,
-        &NSString::from_str(text),&NSString::from_str(text),false,keycode).unwrap();
-    let responder = window.firstResponder().expect("first responder");
-    let _: () = msg_send![&*responder,keyDown:&*event];
 }
 
 fn main() {

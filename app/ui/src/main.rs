@@ -550,6 +550,16 @@ fn import_image(bytes: &[u8], extension: &str) -> Result<(String, std::path::Pat
 }
 /// 왼쪽 워크스페이스 행 간격. 행 높이 40pt + 여백 6pt.
 const WORKSPACE_ROW_STEP: f64 = 46.;
+/// The storage engine beside this executable, or the one `STOLOGY_CORE` names.
+fn core_exe() -> std::path::PathBuf {
+    std::env::var_os("STOLOGY_CORE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .unwrap()
+                .with_file_name("stology-core")
+        })
+}
 fn rpc(value: Value) -> Result<Value, String> {
     rpc_inner(value, None)
 }
@@ -557,14 +567,7 @@ fn rpc_inner(
     value: Value,
     pid: Option<(Arc<AtomicI32>, Arc<AtomicBool>)>,
 ) -> Result<Value, String> {
-    let exe = std::env::var_os("STOLOGY_CORE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::current_exe()
-                .unwrap()
-                .with_file_name("stology-core")
-        });
-    let mut cmd = Command::new(exe);
+    let mut cmd = Command::new(core_exe());
     cmd.arg("--request")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -626,6 +629,30 @@ fn mtm() -> MainThreadMarker {
 }
 unsafe fn view(frame: NSRect) -> Retained<NSView> {
     NSView::initWithFrame(NSView::alloc(mtm()), frame)
+}
+/// A transparent scroll view over `list`, opened at `top`.
+unsafe fn list_scroll(frame: NSRect, list: &NSView, top: f64) -> Retained<NSScrollView> {
+    let scroll = scrollbar::vertical(frame);
+    scroll.setAutohidesScrollers(true);
+    scroll.setDrawsBackground(false);
+    scroll.setDocumentView(Some(list));
+    list.scrollPoint(NSPoint::new(0., top));
+    scroll
+}
+/// A message where a preview could not be shown: `inset` from the sides, its text
+/// box `height` tall and starting `top` below the upper edge.
+unsafe fn preview_notice(frame: NSRect, message: &str, inset: f64, top: f64, height: f64) -> Retained<NSView> {
+    let p = view(frame);
+    let label = text_label(
+        message,
+        rect(inset, p.frame().size.height - top, p.frame().size.width - inset * 2., height),
+        14.,
+        false,
+    );
+    label.setMaximumNumberOfLines(8);
+    label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    p.addSubview(&label);
+    p
 }
 unsafe fn text_label(text: &str, frame: NSRect, size: f64, bold: bool) -> Retained<NSTextField> {
     let label = NSTextField::labelWithString(&NSString::from_str(text), mtm());
@@ -1695,15 +1722,7 @@ impl State {
                         msg_send![&b, setAccessibilityValue: &*NSString::from_str("선택됨")];
                 }
             }
-            let scroll =
-                NSScrollView::initWithFrame(NSScrollView::alloc(mtm()), rect(0., 150., lw, area));
-            scroll.setHasVerticalScroller(true);
-            crate::scrollbar::style(&scroll);
-            scroll.setAutohidesScrollers(true);
-            scroll.setDrawsBackground(false);
-            scroll.setDocumentView(Some(&list));
-            list.scrollPoint(NSPoint::new(0., ch));
-            left.addSubview(&scroll);
+            left.addSubview(&list_scroll(rect(0., 150., lw, area), &list, ch));
         }
         left.addSubview(&theme::soft_divider(rect(14., 142., lw - 28., 1.), true));
         self.row(
@@ -1875,17 +1894,7 @@ impl State {
                     menu.addItem(&item);
                     row.setMenu(Some(&menu));
                 }
-                let scroll = NSScrollView::initWithFrame(
-                    NSScrollView::alloc(mtm()),
-                    rect(10., 10., w - 20., area),
-                );
-                scroll.setHasVerticalScroller(true);
-                crate::scrollbar::style(&scroll);
-                scroll.setAutohidesScrollers(true);
-                scroll.setDrawsBackground(false);
-                scroll.setDocumentView(Some(&list));
-                list.scrollPoint(NSPoint::new(0., ch));
-                self.right.addSubview(&scroll);
+                self.right.addSubview(&list_scroll(rect(10., 10., w - 20., area), &list, ch));
             }
         }
     }
@@ -2661,23 +2670,13 @@ impl State {
                                 self.preview = Some(p);
                             }
                             Err(e) => {
-                                let p = view(self.editor_scroll.frame());
-                                let label = text_label(
-                                    &format!(
-                                    "원본을 표시할 수 없습니다\n\n{e}\n\n보관된 파일은 유지됩니다."
-                                ),
-                                    rect(
-                                        28.,
-                                        p.frame().size.height - 180.,
-                                        p.frame().size.width - 56.,
-                                        140.,
-                                    ),
-                                    14.,
-                                    false,
+                                let p = preview_notice(
+                                    self.editor_scroll.frame(),
+                                    &format!("원본을 표시할 수 없습니다\n\n{e}\n\n보관된 파일은 유지됩니다."),
+                                    28.,
+                                    180.,
+                                    140.,
                                 );
-                                label.setMaximumNumberOfLines(8);
-                                label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
-                                p.addSubview(&label);
                                 self.editor_scroll.setHidden(true);
                                 self.center.addSubview(&p);
                                 self.preview = Some(p);
@@ -4370,15 +4369,7 @@ impl State {
             frame.origin.y += ch;
             child.setFrame(frame);
         }
-        let scroll =
-            NSScrollView::initWithFrame(NSScrollView::alloc(mtm()), rect(0., 10., w, area));
-        scroll.setHasVerticalScroller(true);
-        crate::scrollbar::style(&scroll);
-        scroll.setAutohidesScrollers(true);
-        scroll.setDrawsBackground(false);
-        scroll.setDocumentView(Some(&list));
-        list.scrollPoint(NSPoint::new(0., ch));
-        self.right.addSubview(&scroll);
+        self.right.addSubview(&list_scroll(rect(0., 10., w, area), &list, ch));
     }
     unsafe fn evidence(&mut self, e: Value) {
         if !self.flush() {
@@ -5024,23 +5015,13 @@ impl State {
                     self.preview_rendered = rendered;
                 }
                 Err(e) => {
-                    let p = view(self.editor_scroll.frame());
-                    let label = text_label(
-                        &format!(
-                            "PPTX 미리보기를 표시할 수 없습니다.\n{e}\nPDF로 변환해 가져오세요."
-                        ),
-                        rect(
-                            20.,
-                            p.frame().size.height - 150.,
-                            p.frame().size.width - 40.,
-                            120.,
-                        ),
-                        14.,
-                        false,
+                    let p = preview_notice(
+                        self.editor_scroll.frame(),
+                        &format!("PPTX 미리보기를 표시할 수 없습니다.\n{e}\nPDF로 변환해 가져오세요."),
+                        20.,
+                        150.,
+                        120.,
                     );
-                    label.setMaximumNumberOfLines(8);
-                    label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
-                    p.addSubview(&label);
                     p.setHidden(self.map.is_some());
                     self.center.addSubview(&p);
                     self.preview = Some(p);

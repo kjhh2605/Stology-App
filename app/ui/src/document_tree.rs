@@ -635,21 +635,7 @@ impl DocumentTree {
         self.finish_rename(false);
         let restoring = self.ivars().restoring.replace(true);
         let outline = &self.ivars().outline;
-        outline.expandItem(Some(&self.ivars().nodes[0].key));
-        let mut ancestors: Vec<_> = self
-            .ivars()
-            .nodes
-            .iter()
-            .filter(|folder| {
-                folder.folder()
-                    && !folder.path.is_empty()
-                    && node.path.starts_with(&format!("{}/", folder.path))
-            })
-            .collect();
-        ancestors.sort_by_key(|folder| folder.path.len());
-        for folder in ancestors {
-            outline.expandItem(Some(&folder.key));
-        }
+        self.expand_ancestors(&node.path, false);
         let row = outline.rowForItem(Some(&node.key));
         if row >= 0 {
             outline.scrollRowToVisible(row);
@@ -814,8 +800,9 @@ impl DocumentTree {
             }
         }
     }
-    pub unsafe fn reveal_folder(&self, path: &str) {
-        self.ivars().restoring.set(true);
+    /// Expands the root and every folder above `path`, outermost first. With
+    /// `inclusive`, the folder at `path` itself is expanded as well.
+    unsafe fn expand_ancestors(&self, path: &str, inclusive: bool) {
         let outline = &self.ivars().outline;
         outline.expandItem(Some(&self.ivars().nodes[0].key));
         let mut ancestors: Vec<_> = self
@@ -825,13 +812,18 @@ impl DocumentTree {
             .filter(|n| {
                 n.folder()
                     && !n.path.is_empty()
-                    && (path == n.path || path.starts_with(&format!("{}/", n.path)))
+                    && ((inclusive && path == n.path) || path.starts_with(&format!("{}/", n.path)))
             })
             .collect();
         ancestors.sort_by_key(|n| n.path.len());
         for n in ancestors {
             outline.expandItem(Some(&n.key));
         }
+    }
+    pub unsafe fn reveal_folder(&self, path: &str) {
+        self.ivars().restoring.set(true);
+        let outline = &self.ivars().outline;
+        self.expand_ancestors(path, true);
         if let Some(n) = self
             .ivars()
             .nodes
@@ -1085,19 +1077,7 @@ impl DocumentTree {
             })
         });
         if let Some(n) = selected {
-            outline.expandItem(Some(&self.ivars().nodes[0].key));
-            let mut ancestors: Vec<_> = self
-                .ivars()
-                .nodes
-                .iter()
-                .filter(|f| {
-                    f.folder() && !f.path.is_empty() && n.path.starts_with(&format!("{}/", f.path))
-                })
-                .collect();
-            ancestors.sort_by_key(|f| f.path.len());
-            for f in ancestors {
-                outline.expandItem(Some(&f.key));
-            }
+            self.expand_ancestors(&n.path, false);
             let row = outline.rowForItem(Some(&n.key));
             if row >= 0 {
                 outline.selectRowIndexes_byExtendingSelection(
@@ -1252,9 +1232,7 @@ pub unsafe fn build(
     for f in folders {
         outline.expandItem(Some(&f.key));
     }
-    let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm()), frame);
-    scroll.setHasVerticalScroller(true);
-    crate::scrollbar::style(&scroll);
+    let scroll = crate::scrollbar::vertical(frame);
     scroll.setHasHorizontalScroller(false);
     scroll.setAutohidesScrollers(true);
     scroll.setDrawsBackground(false);

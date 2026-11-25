@@ -1,8 +1,8 @@
 //! App-owned skill bundle: bundled defaults, an optional user copy, fingerprints,
 //! routing values, tier→model rules, AI settings and the usage log.
+pub(crate) use crate::storage::digest;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Write,
@@ -62,9 +62,6 @@ pub(crate) fn write_json(path: &Path, v: &Value) -> Result<()> {
     fs::write(&tmp, serde_json::to_vec_pretty(v)?)?;
     fs::rename(tmp, path)?;
     Ok(())
-}
-pub(crate) fn digest(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
 }
 fn manifest() -> Result<Value> {
     read_json(&bundle_dir()?.join("manifest.json"))

@@ -1,9 +1,9 @@
 //! Immutable extraction snapshots and evidence-validated, transactional knowledge graph.
+use crate::storage::digest;
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -97,9 +97,6 @@ fn required<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("필수 항목이 없습니다: {key}"))
-}
-fn digest(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
 }
 pub(crate) fn normalized(s: &str) -> String {
     s.split_whitespace()

@@ -95,6 +95,15 @@ pub unsafe fn style(scroll: &NSScrollView) {
     scroll.setVerticalScroller(Some(&scroller));
 }
 
+/// A scroll view with the slim vertical scroller already in place.
+pub unsafe fn vertical(frame: NSRect) -> Retained<NSScrollView> {
+    let mtm = MainThreadMarker::new().expect("scroller requires main thread");
+    let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), frame);
+    scroll.setHasVerticalScroller(true);
+    style(&scroll);
+    scroll
+}
+
 /// PDFKit owns its scroll view, so find it within the PDF view hierarchy.
 pub unsafe fn style_descendants(view: &NSView) {
     for child in view.subviews().iter() {

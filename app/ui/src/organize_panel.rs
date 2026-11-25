@@ -185,9 +185,7 @@ impl Panel {
         root.addSubview(&scroll);
         let provider_menu = popup(&target, &PROVIDERS, PROVIDER);
         let mode_menu = popup(&target, &MODES, MODE);
-        let guidance_scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm()), rect(0., 0., WIDTH, 70.));
-        guidance_scroll.setHasVerticalScroller(true);
-        scrollbar::style(&guidance_scroll);
+        let guidance_scroll = scrollbar::vertical(rect(0., 0., WIDTH, 70.));
         let guidance = NSTextView::initWithFrame(NSTextView::alloc(mtm()), rect(0., 0., WIDTH - 18., 70.));
         guidance.setRichText(false);
         guidance.setImportsGraphics(false);

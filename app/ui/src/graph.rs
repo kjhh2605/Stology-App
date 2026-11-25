@@ -777,7 +777,8 @@ fn clear_selection(s: &mut State) {
     }
     reset_view(s);
 }
-fn reset_view(s: &mut State) {
+/// Drops the selection, hover and drag, and anything waiting on entry.
+fn forget_selection(s: &mut State) {
     s.entry_pending = false;
     s.selected = None;
     s.selected_node = None;
@@ -785,6 +786,9 @@ fn reset_view(s: &mut State) {
     s.hovered = None;
     s.hovered_link = None;
     s.drag = None;
+}
+fn reset_view(s: &mut State) {
+    forget_selection(s);
     s.unit_focus.clear();
     refresh_shown(s);
     apply_highlight(s);
@@ -2636,13 +2640,7 @@ pub fn focus_unit(unit: &str) {
             return;
         }
         s.unit_focus = unit.into();
-        s.entry_pending = false;
-        s.selected = None;
-        s.selected_node = None;
-        s.selected_link = None;
-        s.hovered = None;
-        s.hovered_link = None;
-        s.drag = None;
+        forget_selection(&mut s);
         refresh_shown(&mut s);
         apply_highlight(&mut s);
         overview(&mut s, true);
@@ -2840,20 +2838,7 @@ pub unsafe fn capture(width: f64, height: f64, scale: f64) -> Result<Vec<u8>, St
             pw,
             ph,
         )?;
-        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
-            NSBitmapImageRep::alloc(),
-            std::ptr::null_mut(),
-            pw as isize,
-            ph as isize,
-            8,
-            4,
-            true,
-            false,
-            NSDeviceRGBColorSpace,
-            (pw * 4) as isize,
-            32,
-        )
-        .ok_or("라벨 비트맵 생성 실패")?;
+        let rep = metal::rgba_bitmap(pw, ph).ok_or("라벨 비트맵 생성 실패")?;
         std::ptr::write_bytes(rep.bitmapData(), 0, rep.bytesPerRow() as usize * ph);
         let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)
             .ok_or("라벨 그래픽 컨텍스트 생성 실패")?;

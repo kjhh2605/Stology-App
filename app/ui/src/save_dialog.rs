@@ -165,9 +165,7 @@ pub unsafe fn choose(
     let root = target.ivars().nodes.borrow()[0].clone();
     outline.expandItem(Some(&root));
     outline.selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(0), false);
-    let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm()), rect(0., 47., 460., 208.));
-    scroll.setHasVerticalScroller(true);
-    crate::scrollbar::style(&scroll);
+    let scroll = crate::scrollbar::vertical(rect(0., 47., 460., 208.));
     scroll.setBorderType(NSBorderType::BezelBorder);
     scroll.setDocumentView(Some(&outline));
     container.addSubview(&scroll);

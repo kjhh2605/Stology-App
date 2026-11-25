@@ -3,6 +3,7 @@
 use super::*;
 use objc2::DefinedClass;
 use objc2::runtime::AnyClass;
+use stology_core::providers::base64;
 
 pub const MAX_IMAGES: usize = 10;
 /// 공급자 한도(base64 5MB)를 넘지 않도록 원본 바이트를 이 크기 이하로 맞춘다.
@@ -19,19 +20,6 @@ pub struct Attachment {
     pub mime: String,
     pub data: String,
     image: Retained<NSImage>,
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut s = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for b in bytes.chunks(3) {
-        let n = ((b[0] as u32) << 16) | ((b.get(1).copied().unwrap_or(0) as u32) << 8) | (b.get(2).copied().unwrap_or(0) as u32);
-        s.push(T[(n >> 18) as usize & 63] as char);
-        s.push(T[(n >> 12) as usize & 63] as char);
-        s.push(if b.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        s.push(if b.len() > 2 { T[n as usize & 63] as char } else { '=' });
-    }
-    s
 }
 
 fn sniff(bytes: &[u8]) -> Option<&'static str> {
@@ -173,12 +161,7 @@ define_class!(
         #[unsafe(method(updateTrackingAreas))]
         fn update_tracking(&self) { unsafe {
             let _: () = msg_send![super(self), updateTrackingAreas];
-            for area in self.trackingAreas().iter() { self.removeTrackingArea(&area); }
-            let area = NSTrackingArea::initWithRect_options_owner_userInfo(
-                NSTrackingArea::alloc(), self.bounds(),
-                NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways
-                    | NSTrackingAreaOptions::InVisibleRect, Some(self), None);
-            self.addTrackingArea(&area);
+            theme::track_bounds(self, NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways);
         } }
         #[unsafe(method(mouseEntered:))]
         fn entered(&self, _event: &NSEvent) { self.show_close(true); }

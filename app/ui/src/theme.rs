@@ -19,9 +19,17 @@ fn mtm() -> MainThreadMarker {
 fn color(r: f64, g: f64, b: f64, a: f64) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a)
 }
-unsafe fn layer(view: &NSView) -> Retained<AnyObject> {
+pub unsafe fn layer(view: &NSView) -> Retained<AnyObject> {
     view.setWantsLayer(true);
     msg_send![view, layer]
+}
+/// Replaces the view's tracking areas with one that follows its visible bounds.
+pub unsafe fn track_bounds(view: &NSView, options: NSTrackingAreaOptions) {
+    for area in view.trackingAreas().iter() { view.removeTrackingArea(&area); }
+    let area = NSTrackingArea::initWithRect_options_owner_userInfo(
+        NSTrackingArea::alloc(), view.bounds(),
+        options | NSTrackingAreaOptions::InVisibleRect, Some(view), None);
+    view.addTrackingArea(&area);
 }
 unsafe fn shadow(view: &NSView, opacity: f32, radius: f64) {
     let l = layer(view);
@@ -831,12 +839,7 @@ objc2::define_class!(
         #[unsafe(method(updateTrackingAreas))]
         fn update_tracking(&self) { unsafe {
             let _: () = msg_send![super(self), updateTrackingAreas];
-            for area in self.trackingAreas().iter() { self.removeTrackingArea(&area); }
-            let area = NSTrackingArea::initWithRect_options_owner_userInfo(
-                NSTrackingArea::alloc(), self.bounds(),
-                NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways
-                    | NSTrackingAreaOptions::InVisibleRect, Some(self), None);
-            self.addTrackingArea(&area);
+            track_bounds(self, NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways);
         } }
         #[unsafe(method(mouseEntered:))]
         fn entered(&self, _event: &NSEvent) { self.ivars().hover.set(true); self.setNeedsDisplay(true); }
@@ -994,12 +997,7 @@ objc2::define_class!(
         #[unsafe(method(updateTrackingAreas))]
         fn update_tracking(&self) { unsafe {
             let _: () = msg_send![super(self), updateTrackingAreas];
-            for area in self.trackingAreas().iter() { self.removeTrackingArea(&area); }
-            let area = NSTrackingArea::initWithRect_options_owner_userInfo(
-                NSTrackingArea::alloc(), self.bounds(),
-                NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveInKeyWindow
-                    | NSTrackingAreaOptions::InVisibleRect, Some(self), None);
-            self.addTrackingArea(&area);
+            track_bounds(self, NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveInKeyWindow);
         } }
         #[unsafe(method(mouseEntered:))]
         fn entered(&self, _event: &NSEvent) { unsafe {

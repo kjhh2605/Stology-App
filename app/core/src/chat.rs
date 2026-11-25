@@ -489,7 +489,7 @@ fn list_command(root: &Path, p: &str, work: &Path) -> Result<Command> {
     cmd.current_dir(work).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
     if p == "codex" {
         // `-c features.*` is ignored rather than refused when a feature does not exist yet.
-        cmd.args(["app-server", "--stdio", "-c", "features.hooks=false", "-c", "features.plugins=false", "-c", "features.apps=false", "-c", "mcp_servers={}"]);
+        cmd.args(super::providers::CODEX_APP_SERVER);
     } else {
         cmd.args(["--print", "--tools", "", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}",
             "--setting-sources", "", "--no-session-persistence", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]);
@@ -516,8 +516,7 @@ fn query(root: &Path, p: &str, probe: Probe) -> std::result::Result<Vec<Value>, 
         let _ = err_tx.send(text);
         let _ = std::io::copy(&mut reader, &mut std::io::sink());
     });
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || { for line in BufReader::new(output).lines() { if tx.send(line).is_err() { break; } } });
+    let rx = super::providers::stdout_lines(output);
     let stop = match converse(p, probe, &mut input, &rx) {
         Ok(list) => return Ok(list),
         Err(stop) => stop,

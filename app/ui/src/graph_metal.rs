@@ -768,18 +768,14 @@ pub fn stroke_width(
     }
     column.iter().sum::<f64>() / peak
 }
-/// Write tightly packed BGRA pixels (top row first) as a PNG file.
-#[allow(dead_code)]
-pub unsafe fn write_png(
-    path: &str,
-    bgra: &[u8],
+/// An 8-bit RGBA bitmap whose pixel storage AppKit allocates and owns.
+pub unsafe fn rgba_bitmap(
     width: usize,
     height: usize,
-) -> Result<(), String> {
+) -> Option<Retained<objc2_app_kit::NSBitmapImageRep>> {
     use objc2::AnyThread;
-    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace};
-    use objc2_foundation::NSDictionary;
-    let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+    use objc2_app_kit::{NSBitmapImageRep, NSDeviceRGBColorSpace};
+    NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
         NSBitmapImageRep::alloc(),
         std::ptr::null_mut(),
         width as isize,
@@ -792,7 +788,18 @@ pub unsafe fn write_png(
         (width * 4) as isize,
         32,
     )
-    .ok_or("PNG 비트맵 생성 실패")?;
+}
+/// Write tightly packed BGRA pixels (top row first) as a PNG file.
+#[allow(dead_code)]
+pub unsafe fn write_png(
+    path: &str,
+    bgra: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<(), String> {
+    use objc2_app_kit::NSBitmapImageFileType;
+    use objc2_foundation::NSDictionary;
+    let rep = rgba_bitmap(width, height).ok_or("PNG 비트맵 생성 실패")?;
     let data = rep.bitmapData();
     let row = rep.bytesPerRow() as usize;
     for y in 0..height {

@@ -392,9 +392,7 @@ unsafe fn send_button_state(button: &NSButton, stopping: bool) {
     let _: () = msg_send![button,setAccessibilityLabel:&*label];
 }
 unsafe fn area(input: bool) -> (Retained<NSScrollView>, Retained<NSTextView>) {
-    let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm()), rect(0., 0., 300., 100.));
-    scroll.setHasVerticalScroller(true);
-    crate::scrollbar::style(&scroll);
+    let scroll = crate::scrollbar::vertical(rect(0., 0., 300., 100.));
     let text: Retained<NSTextView> = if input {
         let t: Retained<ChatInput> =
             msg_send![ChatInput::alloc(mtm()),initWithFrame:rect(0.,0.,300.,100.)];
@@ -1093,14 +1091,7 @@ impl Panel {
             self.error = e;
             return;
         }
-        let exe = std::env::var_os("STOLOGY_CORE")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::current_exe()
-                    .unwrap()
-                    .with_file_name("stology-core")
-            });
-        let child = Command::new(exe)
+        let child = Command::new(core_exe())
             .arg("--chat-stream")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

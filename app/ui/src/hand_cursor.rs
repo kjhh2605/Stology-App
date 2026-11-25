@@ -22,13 +22,7 @@ define_class!(
         #[unsafe(method(updateTrackingAreas))]
         fn update_tracking(&self) { unsafe {
             let _: () = msg_send![super(self), updateTrackingAreas];
-            for area in self.trackingAreas().iter() { self.removeTrackingArea(&area); }
-            let area = NSTrackingArea::initWithRect_options_owner_userInfo(
-                NSTrackingArea::alloc(), self.bounds(),
-                NSTrackingAreaOptions::CursorUpdate | NSTrackingAreaOptions::InVisibleRect
-                    | NSTrackingAreaOptions::ActiveInKeyWindow,
-                Some(self), None);
-            self.addTrackingArea(&area);
+            theme::track_bounds(self, NSTrackingAreaOptions::CursorUpdate | NSTrackingAreaOptions::ActiveInKeyWindow);
         } }
 
         #[unsafe(method(cursorUpdate:))]

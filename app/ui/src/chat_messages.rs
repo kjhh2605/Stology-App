@@ -134,10 +134,7 @@ pub struct Messages {
 }
 impl Messages {
     pub unsafe fn new() -> Self {
-        let scroll =
-            NSScrollView::initWithFrame(NSScrollView::alloc(mtm()), rect(0., 0., 340., 400.));
-        scroll.setHasVerticalScroller(true);
-        crate::scrollbar::style(&scroll);
+        let scroll = crate::scrollbar::vertical(rect(0., 0., 340., 400.));
         scroll.setDrawsBackground(false);
         scroll.setBorderType(NSBorderType::NoBorder);
         let document = flipped();

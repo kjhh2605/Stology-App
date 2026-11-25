@@ -1,10 +1,11 @@
 //! Notes from study-assistant conversations against a fake Codex CLI: what is offered
 //! without a model, one batched call in the back lane, and the suggestion box.
+mod common;
+use common::{call, calls, request};
 use serde_json::{json, Value};
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
-    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -68,29 +69,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':100,'output_to
 "##;
 
 fn fixture() -> (tempfile::TempDir, String) {
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("runtime/bin");
-    fs::create_dir_all(&bin).unwrap();
-    fs::write(bin.join("codex"), FAKE_CODEX).unwrap();
-    fs::set_permissions(bin.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
-    fs::write(dir.path().join("provider.json"), r#"{"provider":"codex"}"#).unwrap();
-    let w = call(dir.path(), json!({"op":"workspace.create","name":"검증 과목"}))["id"].as_str().unwrap().to_owned();
-    (dir, w)
-}
-fn request(root: &Path, request: Value) -> Value {
-    let mut p = Command::new(env!("CARGO_BIN_EXE_stology-core"))
-        .args(["--root", root.to_str().unwrap()])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    p.stdin.take().unwrap().write_all(request.to_string().as_bytes()).unwrap();
-    serde_json::from_slice(&p.wait_with_output().unwrap().stdout).unwrap()
-}
-fn call(root: &Path, r: Value) -> Value {
-    let v = request(root, r.clone());
-    assert_eq!(v["ok"], true, "{r} → {v}");
-    v["result"].clone()
+    common::fixture(FAKE_CODEX)
 }
 /// The subject knows 스택 and 자료구조 after one organised note.
 fn organise(root: &Path, w: &str) {
@@ -137,9 +116,6 @@ fn settle(root: &Path, w: &str) -> Value {
         assert!(Instant::now() < deadline, "{s}");
         std::thread::sleep(Duration::from_millis(100));
     }
-}
-fn calls(root: &Path) -> Vec<Value> {
-    fs::read_to_string(root.join("fake-calls.jsonl")).unwrap_or_default().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
 }
 fn mode(root: &Path, mode: &str) {
     call(root, json!({"op":"ai.settings.set","distill_mode":mode}));

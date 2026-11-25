@@ -1,12 +1,11 @@
 //! 과목 정리 end to end against a fake Codex CLI: chunked reading, evidence checks
 //! and re-reading, aligning, connecting, publishing at once, and stopping.
+mod common;
+use common::{call, calls, request};
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::Write,
-    os::unix::fs::PermissionsExt,
     path::Path,
-    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -77,29 +76,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':100,'output_to
 "##;
 
 fn fixture() -> (tempfile::TempDir, String) {
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("runtime/bin");
-    fs::create_dir_all(&bin).unwrap();
-    fs::write(bin.join("codex"), FAKE_CODEX).unwrap();
-    fs::set_permissions(bin.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
-    fs::write(dir.path().join("provider.json"), r#"{"provider":"codex"}"#).unwrap();
-    let w = call(dir.path(), json!({"op":"workspace.create","name":"검증 과목"}))["id"].as_str().unwrap().to_owned();
-    (dir, w)
-}
-fn request(root: &Path, request: Value) -> Value {
-    let mut p = Command::new(env!("CARGO_BIN_EXE_stology-core"))
-        .args(["--root", root.to_str().unwrap()])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    p.stdin.take().unwrap().write_all(request.to_string().as_bytes()).unwrap();
-    serde_json::from_slice(&p.wait_with_output().unwrap().stdout).unwrap()
-}
-fn call(root: &Path, r: Value) -> Value {
-    let v = request(root, r.clone());
-    assert_eq!(v["ok"], true, "{r} → {v}");
-    v["result"].clone()
+    common::fixture(FAKE_CODEX)
 }
 fn note(root: &Path, w: &str, title: &str, body: &str) -> Value {
     let d = call(root, json!({"op":"draft.create","workspace_id":w,"body":body}));
@@ -123,9 +100,6 @@ fn organize(root: &Path, w: &str, extra: Value) -> Value {
     }
     call(root, r);
     finish(root, w)
-}
-fn calls(root: &Path) -> Vec<Value> {
-    fs::read_to_string(root.join("fake-calls.jsonl")).unwrap_or_default().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
 }
 fn count(root: &Path, skill: &str) -> usize {
     calls(root).iter().filter(|c| c["skill"] == skill).count()

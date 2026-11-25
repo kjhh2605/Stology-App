@@ -1,4 +1,5 @@
 //! Official subscription CLI adapters. Only job-private files and provider preferences are written here.
+use super::skills::write_json;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use std::{
@@ -27,13 +28,6 @@ fn provider(v: &Value) -> Result<&str> {
 }
 fn json_read(p: &Path) -> Result<Value> {
     Ok(serde_json::from_slice(&fs::read(p)?)?)
-}
-fn write_json(p: &Path, v: &Value) -> Result<()> {
-    fs::create_dir_all(p.parent().unwrap())?;
-    let tmp = p.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    fs::write(&tmp, serde_json::to_vec_pretty(v)?)?;
-    fs::rename(tmp, p)?;
-    Ok(())
 }
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -461,11 +455,16 @@ impl std::ops::DerefMut for ChildGroup {
         &mut self.0
     }
 }
-impl Drop for ChildGroup {
-    fn drop(&mut self) {
+impl ChildGroup {
+    fn kill_group(&self) {
         unsafe {
             libc::kill(-(self.0.id() as i32), libc::SIGKILL);
         }
+    }
+}
+impl Drop for ChildGroup {
+    fn drop(&mut self) {
+        self.kill_group();
         let _ = self.0.wait();
     }
 }
@@ -502,9 +501,7 @@ fn run_capture(
 
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(e) = stdin.write_all(input) {
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
+            child.kill_group();
             let _ = child.wait();
             return Err(e.into());
         }
@@ -515,9 +512,7 @@ fn run_capture(
             break s;
         }
         if start.elapsed() > timeout {
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
+            child.kill_group();
             let _ = child.wait();
             bail!("분석 시간 제한을 초과했습니다. 원본은 보존됩니다.")
         };
@@ -528,17 +523,13 @@ fn run_capture(
                 .map(|m| m.len() > MAX_OUTPUT)
                 .unwrap_or(false)
         {
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
+            child.kill_group();
             let _ = child.wait();
             bail!("공식 도구 출력 크기 제한을 초과했습니다")
         };
         thread::sleep(Duration::from_millis(100));
     };
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
-    }
+    child.kill_group();
     let out = fs::read_to_string(d.join("stdout.jsonl")).unwrap_or_default();
     let err = fs::read_to_string(d.join("stderr.txt")).unwrap_or_default();
     if !status.success() {
@@ -559,6 +550,33 @@ fn run_capture(
         bail!("{} ({}): {}", classify_failure(&detail), status, detail)
     }
     Ok((out, err))
+}
+/// How every Codex app-server run starts, before the caller's own settings.
+pub(crate) const CODEX_APP_SERVER: [&str; 10] = [
+    "app-server",
+    "--stdio",
+    "-c",
+    "features.hooks=false",
+    "-c",
+    "features.plugins=false",
+    "-c",
+    "features.apps=false",
+    "-c",
+    "mcp_servers={}",
+];
+/// A child's stdout, read line by line on its own thread.
+pub(crate) fn stdout_lines(
+    stdout: std::process::ChildStdout,
+) -> mpsc::Receiver<std::io::Result<String>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 fn classify_failure(message: &str) -> &'static str {
     let m = message.to_ascii_lowercase();
@@ -620,18 +638,7 @@ fn login(root: &Path, d: &Path, p: &str) -> Result<Value> {
         return Ok(json!({"logged_in":status(root,p)["logged_in"]}));
     }
     let mut c = clean_command(&path);
-    c.args([
-        "app-server",
-        "--stdio",
-        "-c",
-        "features.hooks=false",
-        "-c",
-        "features.plugins=false",
-        "-c",
-        "features.apps=false",
-        "-c",
-        "mcp_servers={}",
-    ])
+    c.args(CODEX_APP_SERVER)
     .current_dir(d.join("work"))
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -640,15 +647,7 @@ fn login(root: &Path, d: &Path, p: &str) -> Result<Value> {
     let mut child = ChildGroup(c.spawn()?);
     register_child(d, &child)?;
     let mut stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        for l in BufReader::new(stdout).lines() {
-            if tx.send(l).is_err() {
-                break;
-            }
-        }
-    });
+    let rx = stdout_lines(child.stdout.take().unwrap());
     writeln!(
         stdin,
         "{}",
@@ -743,7 +742,7 @@ fn install(root: &Path, d: &Path, p: &str) -> Result<Value> {
     }
     Ok(json!({"installed":bin(root,p).is_some()}))
 }
-fn base64(bytes: &[u8]) -> String {
+pub fn base64(bytes: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::new();
     for b in bytes.chunks(3) {
@@ -790,18 +789,7 @@ fn parse_result(out: &str, p: &str) -> Result<Value> {
 }
 fn codex_default_model(path: &Path, d: &Path) -> Result<String> {
     let mut c = clean_command(path);
-    c.args([
-        "app-server",
-        "--stdio",
-        "-c",
-        "features.hooks=false",
-        "-c",
-        "features.plugins=false",
-        "-c",
-        "features.apps=false",
-        "-c",
-        "mcp_servers={}",
-    ])
+    c.args(CODEX_APP_SERVER)
     .current_dir(d.join("work"))
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -810,15 +798,7 @@ fn codex_default_model(path: &Path, d: &Path) -> Result<String> {
     let mut child = ChildGroup(c.spawn()?);
     register_child(d, &child)?;
     let mut input = child.stdin.take().unwrap();
-    let output = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        for line in BufReader::new(output).lines() {
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
+    let rx = stdout_lines(child.stdout.take().unwrap());
     let result = (|| -> Result<String> {
         writeln!(
             input,
@@ -855,9 +835,7 @@ fn codex_default_model(path: &Path, d: &Path) -> Result<String> {
         }
         bail!("공식 기본 모델 확인 시간 초과")
     })();
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
-    }
+    child.kill_group();
     let _ = child.wait();
     result
 }

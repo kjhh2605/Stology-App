@@ -1,6 +1,7 @@
 //! 구독 연결 관리 창. 연결한 공급자는 모두 채팅 모델 메뉴에서 함께 쓰므로
 //! 이 창은 공급자를 고르지 않고 공급자별 설치·로그인 상태만 관리한다.
 //! 행을 펼쳐야 설치·로그인 텍스트 버튼이 나타난다.
+use crate::theme::layer;
 use crate::{font, hand_cursor, mtm, rect, text_label, theme};
 use objc2::{define_class, msg_send, rc::Retained, runtime::AnyObject, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::*;
@@ -102,7 +103,6 @@ unsafe fn flipped(frame: NSRect) -> Retained<NSView> {
     let v: Retained<Flipped> = msg_send![Flipped::alloc(mtm()), initWithFrame: frame];
     v.into_super()
 }
-unsafe fn layer(v: &NSView) -> Retained<AnyObject> { v.setWantsLayer(true); msg_send![v, layer] }
 
 unsafe fn schedule(target: &Controller, selector: objc2::runtime::Sel, delay: f64) {
     let modes = NSArray::from_slice(&[NSDefaultRunLoopMode, NSModalPanelRunLoopMode]);
