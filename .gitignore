@@ -9,3 +9,27 @@ __pycache__/
 /decisions/
 /docs/
 AGENTS.md
+.worktreeinclude
+
+# Personal development records (kept locally, not published)
+/.agents/
+/*-PLAN.md
+/CLI-COMPATIBILITY-UI.html
+/stology-macos-distribution.pdf
+/app/CLAUDE.md
+/app/bench/
+/app/tests/providers/
+/app/docs/ui-glossary.md
+/app/docs/images/ui-glossary/
+/app/docs/sidebar-interactions.md
+/app/docs/markdown-parity.md
+/app/docs/graph-parity.md
+/app/docs/provider-evidence.md
+/app/qa/*
+!/app/qa/fixtures/
+/app/guide/assets/graph-parity.html
+/app/guide/assets/installed-app-2026-11-14.html
+/app/guide/assets/pdf-annotation-implementation.html
+/landing/REFERENCE-NOTES.md
+/landing/qa/*.png
+/landing/qa/*-results.json

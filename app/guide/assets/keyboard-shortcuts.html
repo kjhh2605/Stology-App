@@ -71,7 +71,7 @@
 </table></div>
 <p>예: 부모 불릿 → Enter → Tab → 자식 내용 입력 → Enter → <strong>빈 하위 불릿</strong> → Enter → <strong>빈 최상위 불릿</strong> → Enter → <strong>일반 문단</strong>.</p>
 <p>깊이가 여러 단계면 빈 항목에서 Enter를 누를 때마다 한 단계씩 나옵니다. 최상위에 도달한 뒤 추가 Enter가 불릿을 해제합니다. 내용이 있으면 Enter는 다음 항목을 만드는 동작입니다.</p>
-<p>Tab은 커서가 본문 중간에 있어도 항목 전체에 적용되며, 바로 이어진 하위 항목도 함께 이동합니다. Tab/⇧Tab은 번호 목록, <code>-</code>·<code>*</code>·<code>+</code> 불릿과 그 체크리스트에서 사용할 수 있습니다. 번호 목록에서 텍스트를 선택한 채 누르면 선택이 걸친 번호 항목을 함께 들여쓰거나 내어쓰고 선택을 유지합니다.</p>
+<p>Tab은 커서가 본문 중간에 있어도 항목 전체에 적용되며, 바로 이어진 하위 항목도 함께 이동합니다. 현재 Tab/⇧Tab 목록 들여쓰기는 <code>-</code>, <code>*</code>, <code>+</code> 불릿과 그 체크리스트에 적용됩니다. 선택 영역이 있으면 이 항목 단위 들여쓰기 규칙을 적용하지 않습니다.</p>
 <p>한 단계는 원문 공백 두 칸입니다. 첫 항목도 한 번 들여쓸 수 있지만, 앞선 부모 없이 계속 Tab을 눌러 코드 문법이 되는 깊이로 이동하지는 않습니다.</p>
 <h2>번호 목록·체크리스트·인용</h2>
 <div class="table"><table>
@@ -122,7 +122,6 @@
 <p>이 문서는 Stology Local에 구현된 동작을 설명합니다. <a href="https://www.notion.com/help/keyboard-shortcuts">노션 공식 단축키</a>를 참고했지만 노션의 전체 명령을 제공하지는 않습니다. 특히 이 앱의 <code>&gt;</code> + Space는 토글이 아닌 Markdown 인용입니다. <code>/</code> 메뉴, 색상·하이라이트 단축키, 댓글·토글·페이지 생성 단축키는 이 문서의 지원 범위에 포함되지 않습니다.</p>
 <p>새 노트 제목 입력 중 Enter는 제목을 적용하고 본문으로 이동하며, Esc는 기본 제목을 유지합니다. 파일 검색·지도 검색 입력 중 Esc는 해당 검색어를 지웁니다.</p>
 <p>구현 근거: 메뉴와 앱 명령 <code>app/ui/src/main.rs</code>, 편집기 키 처리 <code>app/ui/src/editor.rs</code>, 목록·코드 입력 규칙 <code>app/ui/src/markdown_input.rs</code>, 서식·블록 변환 <code>app/ui/src/markdown_shortcuts.rs</code>.</p>
-<p>검증 기록: 서식 단축키·인용 <code>app/qa/runs/markdown-shortcuts-2026-11-15.md</code>, 불릿 들여쓰기·Enter <code>app/qa/runs/list-indent-2026-11-15.md</code>. 실제 키 입력과 자동 검사, 이번에 확인하지 않은 항목은 각 기록에서 구분합니다.</p>
 <h2>학습도우미</h2>
 <p>채팅 입력창에서 Enter는 줄바꿈, ⌘Enter는 전송이다. 한글 조합 중에는 전송하지 않는다. 생성 중에는 다음 질문을 작성할 수 있고, 현재 응답이 끝난 뒤 전송할 수 있다. 메시지 본문은 선택·복사할 수 있으며 답변마다 복사 버튼이 있다. 중앙 문서의 서식 단축키를 채팅에 적용하지 않는다.</p>
 <h2>다이어그램 캔버스</h2>

@@ -1,6 +1,6 @@
 # Stology 소개 사이트 (한국어 · 영어)
 
-Claude·ChatGPT를 이미 결제한 Mac 대학생에게 Stology를 소개하는 독립 정적 사이트다. 한국어 `/`와 영어 `/en/` 두 페이지를 만들고, 기능 소개는 실제 앱 UI를 재현한 브라우저 장면으로 보여 준다. 제품 범위는 [제품 정책](../app/docs/product-policy.md), 노트 기능은 [앱 단축키 문서](../app/docs/keyboard-shortcuts.md)를 기준으로 한다. 타깃·카피·구조·채널 계획과 그 근거는 [재구축·마케팅 계획](../decisions/2026-11-23/research/landing-marketing-rebuild-plan.md)과 [벤치마크·채널·도구 조사](../decisions/2026-11-23/research/landing-benchmark-and-channel-research.md)에 있다.
+Claude·ChatGPT를 이미 결제한 Mac 대학생에게 Stology를 소개하는 독립 정적 사이트다. 한국어 `/`와 영어 `/en/` 두 페이지를 만들고, 기능 소개는 실제 앱 UI를 재현한 브라우저 장면으로 보여 준다. 제품 범위는 [제품 정책](../app/docs/product-policy.md), 노트 기능은 [앱 단축키 문서](../app/docs/keyboard-shortcuts.md)를 기준으로 한다. 타깃·카피·구조·채널 계획과 그 근거는 재구축·마케팅 계획과 벤치마크·채널·도구 조사에 있다.
 
 ## 로컬 실행
 
@@ -53,9 +53,8 @@ VITE_SITE_URL=https://example.com VITE_UMAMI_ID=xxxx npm run build --prefix land
 | [public/media/](public/media/) · [public/fonts/](public/fonts/) | 실제 앱 이미지, 별 스프라이트, 공식 SUIT 가변 woff2와 [OFL](public/fonts/OFL.txt) |
 | [scripts/check-catalog.mjs](scripts/check-catalog.mjs) | 정적 검사 |
 | [qa/](qa/) | 브라우저 검증 스크립트와 화면 |
-| [REFERENCE-NOTES.md](REFERENCE-NOTES.md) | 레퍼런스 관찰과 적용 원칙 |
 
-한국어 문구는 `humanize-korean` 윤문을 한 번 거쳤다(2026-11-24, 변경률 0.1%). 런타임 UI 프레임워크 없이 Vite로 묶은 HTML·CSS·JavaScript다. 히어로와 06 과목 지도의 지도 부분은 Canvas 2D, 나머지 기능 시연은 DOM/CSS다. 외부 라이브러리·WebGL은 쓰지 않는다. 영상 파일은 마무리 섹션의 소개 영상 하나뿐이다([ADR-041](../decisions/2026-11-24/ADR-041-landing-closing-intro-video.md)).
+한국어 문구는 `humanize-korean` 윤문을 한 번 거쳤다(2026-11-24, 변경률 0.1%). 런타임 UI 프레임워크 없이 Vite로 묶은 HTML·CSS·JavaScript다. 히어로와 06 과목 지도의 지도 부분은 Canvas 2D, 나머지 기능 시연은 DOM/CSS다. 외부 라이브러리·WebGL은 쓰지 않는다. 영상 파일은 마무리 섹션의 소개 영상 하나뿐이다(ADR-041).
 
 ### 페이지 순서
 
@@ -92,10 +91,10 @@ VITE_SITE_URL=https://example.com VITE_UMAMI_ID=xxxx npm run build --prefix land
 
 `npm run check --prefix landing`은 항목 수(16·13), 핵심 수(6·5), id 중복, 장면 함수 존재, 한·영 문구 누락, FAQ의 가격 표현, 선택 구절이 본문에 있는지, 단축키가 앱 문서에 있는지, 지도 장면의 영어 번역표가 개념·단원·자료 이름과 장면 문구를 모두 덮는지, 지도 검색어의 첫 결과가 장면이 여는 개념인지를 검사한다. 영상은 정적 검사에 넣지 않는다. 정적 검사 통과가 화면의 시각 검증을 대신하지 않는다.
 
-브라우저 검증은 Aside REPL 스크립트 [qa/rebuild-check-desktop.js](qa/rebuild-check-desktop.js)(데스크톱 1440×900, 한국어)와 [qa/rebuild-check-mobile-en.js](qa/rebuild-check-mobile-en.js)(모바일 390, 영어, 동작 줄이기)로 하며, 결과는 [실행 기록](../app/qa/runs/landing-rebuild-2026-11-23.md)에 남긴다. 06 과목 지도 장면은 [qa/atlas-check.js](qa/atlas-check.js)(한국어·영어·동작 줄이기)와 [구도 검사](qa/atlas-composition.mjs)로 확인하고 [지도 장면 기록](../app/qa/runs/landing-atlas-2026-11-24.md)에 남겼다. 마무리 소개 영상은 [qa/closing-video-check.js](qa/closing-video-check.js)로 확인하고 [소개 영상 기록](../app/qa/runs/landing-closing-video-2026-11-24.md)에 남겼다. 2026-11-22까지의 녹화 기반 검증 기록([실제 녹화 전환](../app/qa/runs/landing-recorded-2026-11-17.md) 등)과 히어로 검증([은하수 히어로](../app/qa/runs/landing-hero-galaxy-2026-11-22.md))은 이력이다. 히어로 코드는 이번 재구축에서 바꾸지 않았다.
+브라우저 검증은 Aside REPL 스크립트 [qa/rebuild-check-desktop.js](qa/rebuild-check-desktop.js)(데스크톱 1440×900, 한국어)와 [qa/rebuild-check-mobile-en.js](qa/rebuild-check-mobile-en.js)(모바일 390, 영어, 동작 줄이기)로 하며, 결과는 실행 기록에 남긴다. 06 과목 지도 장면은 [qa/atlas-check.js](qa/atlas-check.js)(한국어·영어·동작 줄이기)와 [구도 검사](qa/atlas-composition.mjs)로 확인하고 지도 장면 기록에 남겼다. 마무리 소개 영상은 [qa/closing-video-check.js](qa/closing-video-check.js)로 확인하고 소개 영상 기록에 남겼다. 2026-11-22까지의 녹화 기반 검증 기록(실제 녹화 전환 등)과 히어로 검증(은하수 히어로)은 이력이다. 히어로 코드는 이번 재구축에서 바꾸지 않았다.
 
 ## 결정 기록
 
-정적 사이트 선택은 [ADR-023](../decisions/2026-11-17/ADR-023-korean-product-landing.md), 이전 모션·녹화 방식은 [ADR-024](../decisions/2026-11-17/ADR-024-feature-motion-catalog.md)·[ADR-025](../decisions/2026-11-17/ADR-025-passive-native-demos.md), 히어로는 [ADR-031](../decisions/2026-11-22/ADR-031-landing-hero-icon-ribbon-and-star-sprites.md)·[ADR-032](../decisions/2026-11-22/ADR-032-landing-hero-galaxy-stream-and-single-star.md)·[ADR-033](../decisions/2026-11-22/ADR-033-landing-hero-sky-behind-copy-and-free-star.md), 실제 UI 재현 장면·키캡 토스트·언어별 URL은 [ADR-039](../decisions/2026-11-23/ADR-039-landing-dom-scenes-key-toasts-and-locale-urls.md), 과목 지도의 Canvas 2D 조작 장면은 [ADR-040](../decisions/2026-11-24/ADR-040-landing-course-map-canvas-scene.md), 마무리 소개 영상은 [ADR-041](../decisions/2026-11-24/ADR-041-landing-closing-intro-video.md)에 있다. 녹화 자산의 처리는 [미디어 기록](public/media/README.md)을 본다.
+정적 사이트 선택은 ADR-023, 이전 모션·녹화 방식은 ADR-024·ADR-025, 히어로는 ADR-031·ADR-032·ADR-033, 실제 UI 재현 장면·키캡 토스트·언어별 URL은 ADR-039, 과목 지도의 Canvas 2D 조작 장면은 ADR-040, 마무리 소개 영상은 ADR-041에 있다. 녹화 자산의 처리는 [미디어 기록](public/media/README.md)을 본다.
 
 랜딩 코드만 수정할 때는 Mac 앱 테스트·재설치가 필요하지 않다. 앱 코드를 함께 수정했다면 저장소 [작업 규칙](../AGENTS.md)을 따른다.

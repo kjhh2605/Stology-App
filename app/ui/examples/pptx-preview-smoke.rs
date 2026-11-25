@@ -1,5 +1,5 @@
 //! Optional installed-LibreOffice integration check; no installation performed.
-//! cargo run --manifest-path local-app/ui/Cargo.toml --example pptx-preview-smoke -- local-app/bench/biology.pptx
+//! cargo run --manifest-path app/ui/Cargo.toml --example pptx-preview-smoke -- <file.pptx>
 #[path = "../src/pptx_preview.rs"]
 mod pptx_preview;
 use std::{

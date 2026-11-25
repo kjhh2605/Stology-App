@@ -1,28 +1,20 @@
-# Stology Local · 개인 Mac 테스트 빌드
+# Stology Local
 
-개인 자료를 Markdown으로 저장하고, 원본 자료를 구독 공급자로 분석해 개념·관계·근거를 탐색하는 Apple Silicon Mac 앱이다. 구현은 기존 웹 제품·백엔드와 분리되어 있다. **본인 Mac 테스트용 ad-hoc 서명 빌드이며 Apple 공증 완료 배포본이 아니다.**
+개인 자료를 Markdown으로 저장하고, 원본 자료를 구독 공급자로 분석해 개념·관계·근거를 탐색하는 Apple Silicon Mac 앱이다.
 
-- 실행 앱: `/Applications/Stology Local.app` (Dock과 같은 경로)
-- UI·사이드바·설치 경로 통합: [검증 기록](qa/runs/ui-merge-2026-11-14.md)
-- 빌드 산출물: `dist/Stology Local.app`
-- 설치 이미지: `dist/Stology-Local-arm64.dmg`
+- 빌드 산출물: `dist/Stology Local.app`, 설치 이미지: `dist/Stology-Local-arm64.dmg`
 - 오프라인 가이드: [guide/index.html](guide/index.html)
-- 확정 제품 정책: [docs/product-policy.md](docs/product-policy.md)
-- 3D 지도 동작·검증 목록: [docs/graph-parity.md](docs/graph-parity.md)
-- 독립 QA: [qa/README.md](qa/README.md), [qa/cases.json](qa/cases.json)
-- 자료 트리 선택·우클릭 제목 수정·드래그 이동: [구현 근거](docs/sidebar-interactions.md) · [실행 검증](qa/runs/sidebar-2026-11-14.md)
-- 최신 설치 앱 직접 검증: [2026-11-14 기록](qa/runs/installed-app-2026-11-14.md)
-- Markdown 입력·코드 언어 메뉴·표 셀 편집 수정: [2026-11-14 직접 검증](qa/runs/markdown-editor-2026-11-14.md), [Tolaria 원본 대응](docs/markdown-parity.md)
-- 노트 이미지 붙여넣기·크기 조절·옆 필기: [사용법과 저장 구조](docs/note-images.md) · [검증 기록](qa/runs/note-images-2026-11-15.md)
-- 실제 실행 결과: [qa/runs/](qa/runs/) — 자동 테스트·실제 앱·실제 계정을 구분한다.
-- 기술 결정: [2026-11-13 ADR](../decisions/2026-11-13/README.md)
+- 제품 정책: [docs/product-policy.md](docs/product-policy.md)
+- 단축키와 Markdown 입력: [docs/keyboard-shortcuts.md](docs/keyboard-shortcuts.md)
+- 노트 이미지·다이어그램: [docs/note-images.md](docs/note-images.md)
+- 외부 코드·라이선스: [docs/THIRD-PARTY.md](docs/THIRD-PARTY.md)
 
-독립 저장소의 [문서 색인](../docs/README.md)과 [개발 안내](../docs/DEVELOPMENT.md)를 함께 참고한다. 아래 빌드 명령은 저장소 루트 기준이며 `dist/`는 `app/dist/`를 뜻한다.
+아래 빌드 명령은 저장소 루트 기준이며 `dist/`는 `app/dist/`를 뜻한다.
 
 ## 설치·첫 실행
 
 1. `Stology-Local-arm64.dmg`를 열고 `Stology Local.app`을 Applications로 옮긴다.
-2. 앱을 연다. 개인 테스트 서명으로 인해 macOS가 실행을 막으면 앱 출처를 확인한 뒤 시스템 설정 → 개인정보 보호 및 보안에서 해당 앱의 열기 허용을 사용한다. Gatekeeper를 시스템 전체에서 해제하지 않는다.
+2. 앱을 연다. ad-hoc 서명 빌드라 macOS가 실행을 막으면 앱 출처를 확인한 뒤 시스템 설정 → 개인정보 보호 및 보안에서 해당 앱의 열기 허용을 사용한다. Gatekeeper를 시스템 전체에서 해제하지 않는다.
 3. 과목을 만들고 중앙에서 작성한다. 첫 저장은 제목·폴더를 선택한다. 저장 전 초안은 작성 중에 보관된다. 자료 폴더 우클릭 → 새 노트는 그 폴더에 즉시 파일을 만들고 중앙에서 작성하며, 빈 파일도 유지한다.
 4. 구독 계정 연결에서 Codex 또는 Claude를 선택한다. 공식 CLI가 없다면 선택한 공급자의 설치 절차를 진행한다. 브라우저 인증은 공식 계정 화면에서 수행한다.
 5. 지식지도 펼치기 → 자료 추가하기로 파일을 선택한다. **추출 텍스트와 필요한 이미지가 선택한 구독 공급자에게 전송된다.** 원본은 분석 실패 때도 보존한다.
@@ -36,18 +28,16 @@ Apple Silicon Mac, Xcode Command Line Tools, Rust/Cargo가 필요하다. 공식 
 ```sh
 ./app/scripts/build.sh
 ./app/scripts/test.sh
-python3 decisions/tools/check_decisions.py
 ```
 
 이 Mac의 사용 앱까지 갱신하려면 앱을 종료한 뒤 `./app/scripts/build.sh --install`을 실행한다.
 앱만 빌드·설치하려면 `--app-only --install`을 함께 사용한다. 설치본을 서명 검증 후 교체하고
 이전 앱은 따로 보관하지 않는다(교체 실패 시에만 임시 사본으로 복구). 문서 저장소는 변경하지 않는다.
-평소에는 Dock 또는 `/Applications/Stology Local.app`을 사용한다. `dist`는 패키징 산출물이며
-QA 앱은 시험 데이터 전용이므로 일상 작업용으로 실행하지 않는다.
+평소에는 Dock 또는 `/Applications/Stology Local.app`을 사용한다. `dist`는 패키징 산출물이다.
 
-3D 지도의 그리기 품질과 모션은 `app/ui`의 예제로 따로 확인한다: `graph3d-smoke`(실제 GPU 깊이·절단), `graph-quality`(구 윤곽 편차·관계선 폭·장면 캡처), `graph-live`(실제 창의 모션 루프와 포인터·스크롤 처리, 작은 창이 15초쯤 뜬다). 기준과 측정값은 [ADR-014](../decisions/2026-11-14/ADR-014-local-map-rendering-quality.md)에 있다.
+3D 지도의 그리기 품질과 모션은 `app/ui`의 예제로 따로 확인한다: `graph3d-smoke`(실제 GPU 깊이·절단), `graph-quality`(구 윤곽 편차·관계선 폭·장면 캡처), `graph-live`(실제 창의 모션 루프와 포인터·스크롤 처리, 작은 창이 15초쯤 뜬다).
 
-앱만 만들려면 `./app/scripts/build.sh --app-only`를 사용한다. `Cargo.lock`을 사용하는 release 빌드와 `swiftc -O` 시스템 추출 헬퍼를 묶고 서명을 검증한다. DMG 해시는 `dist/SHA256SUMS`에 기록한다. 실행 환경·측정 자료는 [비교 기록](../decisions/2026-11-13/research/native-web-comparison.md)을 참고한다. 기능 동등성을 통과하지 않은 비교판의 측정은 최종 기술 선택 근거가 아니다.
+앱만 만들려면 `./app/scripts/build.sh --app-only`를 사용한다. `Cargo.lock`을 사용하는 release 빌드와 `swiftc -O` 시스템 추출 헬퍼를 묶고 서명을 검증한다. DMG 해시는 `dist/SHA256SUMS`에 기록한다.
 
 ## 데이터와 복구
 
@@ -59,8 +49,8 @@ PPTX 시스템 미리보기가 내용을 표시하지 못하면 이미 설치된
 
 ## 검증 범위
 
-확정 정책·체크리스트 작성, 자동 테스트, 직접 UI 조작, 실제 구독 분석은 서로 다른 증거다. 최초 QA 케이스는 전부 미실행으로 생성하며 실행별 보고서에 실제 관찰만 기록한다. 실제 로그인·이미지 분석·한글 조합·최종 설치 앱 수용 흐름을 관찰하지 못한 항목은 완료로 간주하지 않는다.
+확정 정책·체크리스트 작성, 자동 테스트, 직접 UI 조작, 실제 구독 분석은 서로 다른 증거다. 실제 로그인·이미지 분석·한글 조합·최종 설치 앱 수용 흐름을 관찰하지 못한 항목은 완료로 간주하지 않는다.
 
-외부 코드·의존성 라이선스는 [docs/THIRD-PARTY.md](docs/THIRD-PARTY.md), 참고 구현에서 채택한 원리와 채택하지 않은 부분은 [조사 근거](../decisions/2026-11-13/research/local-app-references.md)에 기록한다. Tolaria 코드는 복사하지 않는다.
+외부 코드·의존성 라이선스는 [docs/THIRD-PARTY.md](docs/THIRD-PARTY.md)에 기록한다. Tolaria 코드는 복사하지 않는다.
 
 노트 상단의 다이어그램 버튼으로 도형과 화살표를 그리고 본문에 삽입합니다. 그림을 더블클릭하면 다시 편집할 수 있습니다. [다이어그램 사용법](docs/note-images.md#노트-다이어그램)

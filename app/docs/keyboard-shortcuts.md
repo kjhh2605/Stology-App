@@ -154,7 +154,6 @@ Tab은 커서가 본문 중간에 있어도 항목 전체에 적용되며, 바�
 
 구현 근거: [메뉴와 앱 명령](../ui/src/main.rs), [편집기 키 처리](../ui/src/editor.rs), [목록·코드 입력 규칙](../ui/src/markdown_input.rs), [서식·블록 변환](../ui/src/markdown_shortcuts.rs).
 
-검증 기록: [서식 단축키·인용](../qa/runs/markdown-shortcuts-2026-11-15.md), [불릿 들여쓰기·Enter](../qa/runs/list-indent-2026-11-15.md). 실제 키 입력과 자동 검사, 이번에 확인하지 않은 항목은 각 기록에서 구분합니다.
 
 ## 학습도우미
 

@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 GUIDE = Path(__file__).resolve().parent
-SOURCE = GUIDE.parent / 'docs' / 'graph-parity.md'
+SOURCE = GUIDE.parent / 'docs' / 'keyboard-shortcuts.md'
 REPO = GUIDE.parent.parent
 
 def inline(text):
@@ -59,8 +59,5 @@ def render(source, output_name, title, return_anchor='map'):
     (GUIDE / 'assets' / output_name).write_text('\n'.join(parts).replace('local-app/docs/graph-parity.md', str(source.relative_to(REPO))).replace('<title>3D 지도 동등성 대응표</title>', '<title>' + html.escape(title) + '</title>').replace('../index.html#map', '../index.html#' + return_anchor))
     print('Updated offline appendix:', output_name)
 
-render(GUIDE.parent / 'docs' / 'graph-parity.md', 'graph-parity.html', '3D 지도 동등성 대응표')
-render(GUIDE.parent / 'qa' / 'runs' / 'installed-app-2026-11-14.md', 'installed-app-2026-11-14.html', '설치 앱 실제 검증 기록 · 2026-11-14')
 render(GUIDE.parent / 'docs' / 'keyboard-shortcuts.md', 'keyboard-shortcuts.html', 'Stology Local 단축키와 Markdown 입력', return_anchor='write')
 
-render(GUIDE.parent / 'qa' / 'pdf-annotation-implementation.md', 'pdf-annotation-implementation.html', 'PDF 필기 구현·검증 기록 · 2026-11-15', return_anchor='verification')
