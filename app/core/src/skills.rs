@@ -355,8 +355,7 @@ fn stage_plan_catalogs(root: &Path, provider: &str, mode: &str, mut catalogs: st
         anyhow::ensure!(TIERS.contains(&requested), "routing.json의 modes.{mode}.{stage} 값이 올바르지 않습니다");
         let stage_provider = helper_provider(&settings, stage, provider);
         if !catalogs.contains_key(stage_provider) {
-            let result = crate::chat::handle(root, &json!({"op":"chat.models","provider":stage_provider}))?;
-            catalogs.insert(stage_provider.to_owned(), result["models"].as_array().cloned().unwrap_or_default());
+            catalogs.insert(stage_provider.to_owned(), crate::chat::usable_models(root, stage_provider)?);
         }
         let catalog = &catalogs[stage_provider];
         let tiers = tier_models(stage_provider, catalog)?;
@@ -494,8 +493,8 @@ pub fn handle(root: &Path, req: &Value) -> Result<Value> {
             let mut models = Vec::new();
             let mut errors = Vec::new();
             for provider in ["codex", "claude", "antigravity"] {
-                match crate::chat::handle(root, &json!({"op":"chat.models","provider":provider})) {
-                    Ok(result) => for mut model in result["models"].as_array().cloned().unwrap_or_default() {
+                match crate::chat::usable_models(root, provider) {
+                    Ok(list) => for mut model in list {
                         model["provider"] = json!(provider);
                         models.push(model);
                     },
@@ -506,8 +505,7 @@ pub fn handle(root: &Path, req: &Value) -> Result<Value> {
         }
         "ai.tiers" => {
             let provider = req["provider"].as_str().context("공급자 없음")?;
-            let catalog = crate::chat::handle(root, &json!({"op":"chat.models","provider":provider}))?;
-            let list = catalog["models"].as_array().cloned().unwrap_or_default();
+            let list = crate::chat::usable_models(root, provider)?;
             let mode = req["mode"].as_str().map(str::to_owned).unwrap_or_else(|| settings(root)["organize_mode"].as_str().unwrap_or("auto").to_owned());
             let mut plan = stage_plan(root, provider, &mode, &list)?;
             plan["models"] = json!(list);

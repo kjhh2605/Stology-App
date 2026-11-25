@@ -121,6 +121,18 @@ fn output_timeout(mut command: Command, timeout: Duration) -> Result<std::proces
         stderr: b.join().unwrap_or_default(),
     })
 }
+fn version_of(path: &Path) -> Option<String> {
+    let mut c = clean_command(path);
+    c.arg("--version");
+    output_timeout(c, Duration::from_secs(5))
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+}
+/// The installed CLI's version number alone, for failure messages.
+pub(crate) fn version(root: &Path, p: &str) -> Option<String> {
+    let line = version_of(&bin(root, p)?)?;
+    line.split_whitespace().find(|w| w.starts_with(|c: char| c.is_ascii_digit())).map(str::to_owned)
+}
 pub(crate) fn status(root: &Path, p: &str) -> Value {
     let Some(path) = bin(root, p) else {
         return json!({"provider":p,"installed":false,"logged_in":false,"analysis_succeeded":false});
@@ -161,11 +173,7 @@ pub(crate) fn status(root: &Path, p: &str) -> Value {
         }
         Err(e) => (false, "unknown".into(), Some(e.to_string())),
     };
-    let mut c = clean_command(&path);
-    c.arg("--version");
-    let version = output_timeout(c, Duration::from_secs(5))
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
+    let version = version_of(&path);
     let verified = json_read(&root.join(format!("provider-{p}-success.json"))).ok();
     json!({"provider":p,"installed":true,"path":path,"version":version,"logged_in":logged,"auth_kind":kind,"analysis_succeeded":verified.is_some(),"last_analysis":verified,"error":error})
 }
@@ -554,7 +562,12 @@ fn run_capture(
 }
 fn classify_failure(message: &str) -> &'static str {
     let m = message.to_ascii_lowercase();
-    if [
+    if ["unknown option", "unknown feature flag", "unexpected argument", "unrecognized option"]
+        .iter()
+        .any(|s| m.contains(s))
+    {
+        "설치된 공식 CLI가 이 작업에 필요한 옵션을 지원하지 않습니다. 공식 CLI를 업데이트하세요"
+    } else if [
         "usage limit",
         "quota",
         "rate limit",
@@ -1196,6 +1209,9 @@ mod tests {
         assert!(classify_failure("usage limit exceeded").contains("한도"));
         assert!(classify_failure("401 unauthorized").contains("인증"));
         assert!(classify_failure("network timeout").contains("네트워크"));
+        // An older CLI that refuses an option is not mistaken for a login problem.
+        assert!(classify_failure("error: unknown option '--safe-mode' (login)").contains("업데이트"));
+        assert!(classify_failure("Error: Unknown feature flag: skip_host_skill_discovery").contains("업데이트"));
     }
     #[test]
     fn stale_process_identity_does_not_signal_reused_pid() {

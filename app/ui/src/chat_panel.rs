@@ -182,6 +182,8 @@ pub struct Panel {
     models_rx: Option<mpsc::Receiver<(String, Result<Value, String>)>>,
     catalogs: HashMap<String, Vec<Value>>,
     catalog_errors: HashMap<String, String>,
+    /// 목록은 읽었지만 이 CLI로는 채팅 실행 제한을 걸 수 없는 공급자와 그 이유.
+    chat_blocked: HashMap<String, String>,
     catalogs_pending: usize,
     model_refresh_queue: ModelRefreshQueue,
     provider_info: Value,
@@ -256,8 +258,13 @@ impl ModelRefreshQueue {
     fn observe(&mut self, previous: &Value, current: &Value) {
         let connected = |info: &Value, provider: &str| info["providers"].as_array()
             .is_some_and(|ps| ps.iter().any(|p| p["provider"] == provider && p["installed"] == true && p["logged_in"] == true));
+        // 같은 공급자라도 CLI가 바뀌면(업데이트·다른 경로) 지원 기능을 다시 확인한다.
+        let cli = |info: &Value, provider: &str| info["providers"].as_array()
+            .and_then(|ps| ps.iter().find(|p| p["provider"] == provider))
+            .map(|p| (p["path"].clone(), p["version"].clone()));
         for provider in ["claude", "codex", "antigravity"] {
-            if connected(current, provider) && !connected(previous, provider) && !self.0.contains(&provider) {
+            let changed = !connected(previous, provider) || cli(previous, provider) != cli(current, provider);
+            if connected(current, provider) && changed && !self.0.contains(&provider) {
                 self.0.push(provider);
             }
         }
@@ -286,6 +293,54 @@ fn combined_models(catalogs: &HashMap<String, Vec<Value>>, errors: &HashMap<Stri
         }
     }
     items
+}
+/// 공급자 모델 줄 바로 아래에 둘 CLI 도움말. 목록 조회 실패나 채팅 차단 이유를 그 공급자 곁에서 알린다.
+fn with_cli_help(items: Vec<Value>, help: &HashMap<String, String>) -> Vec<Value> {
+    let mut out = Vec::new();
+    for provider in ["claude", "codex", "antigravity"] {
+        out.extend(items.iter().filter(|m| m["provider"] == provider).cloned());
+        if let Some(text) = help.get(provider) {
+            out.push(json!({"provider":provider,"helper":true,"title":text,"available":false}));
+        }
+    }
+    out
+}
+/// 도움말 글은 " · "로 나뉜 조각마다 줄을 바꾸고, 긴 조각은 메뉴 폭에 맞춰 다시 줄바꿈한다.
+/// 첫 조각은 해야 할 일이다. SUIT가 "--"를 긴 줄표로 바꾸지 않게 사이를 끊는다.
+fn cli_help_lines(text: &str) -> String {
+    let mut lines = Vec::new();
+    for part in text.split(" · ") {
+        let mut line = String::new();
+        for word in part.split(' ') {
+            if !line.is_empty() && line.chars().count() + word.chars().count() > 34 {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() { line.push(' '); }
+            line.push_str(word);
+        }
+        if !line.is_empty() { lines.push(line); }
+    }
+    lines.join("\n").replace("--", "-\u{200C}-")
+}
+unsafe fn helper_menu_title(item: &NSMenuItem, text: &str) {
+    let lines = cli_help_lines(text);
+    let shown = NSString::from_str(&lines);
+    let attributed = NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &shown);
+    let full = NSRange::new(0, shown.length());
+    attributed.addAttribute_value_range(NSFontAttributeName, &font::regular(11.), full);
+    attributed.addAttribute_value_range(NSForegroundColorAttributeName, &NSColor::secondaryLabelColor(), full);
+    let paragraph = NSMutableParagraphStyle::new();
+    paragraph.setLineSpacing(2.);
+    attributed.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, full);
+    if let Some(end) = lines.find('\n') {
+        // 첫 줄(무엇을 해야 하는지)은 본문 색으로 또렷하게.
+        let head = NSRange::new(0, NSString::from_str(&lines[..end]).length());
+        attributed.addAttribute_value_range(NSFontAttributeName, &font::weighted(11., 0.2), head);
+        attributed.addAttribute_value_range(NSForegroundColorAttributeName, &NSColor::labelColor(), head);
+    }
+    item.setAttributedTitle(Some(&attributed));
+    item.setEnabled(false);
+    let _: () = msg_send![item, setAccessibilityLabel:&*NSString::from_str(text)];
 }
 unsafe fn model_menu_title(item: &NSMenuItem, title: &str, available: bool) {
     let text = NSString::from_str(&format!("{title}\t●"));
@@ -385,6 +440,8 @@ impl Panel {
             b
         };
         let model = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm()), rect(0.,0.,120.,28.), false);
+        // CLI 도움말 행은 꺼 둔 채로 보여야 한다.
+        model.setAutoenablesItems(false);
         model.setTarget(Some(&*target));
         model.setAction(Some(sel!(chatAction:)));
         model.setTag(9);
@@ -559,6 +616,7 @@ impl Panel {
             models_rx: None,
             catalogs: HashMap::new(),
             catalog_errors: HashMap::new(),
+            chat_blocked: HashMap::new(),
             catalogs_pending: 0,
             model_refresh_queue: ModelRefreshQueue::default(),
             provider_info: Value::Null,
@@ -638,11 +696,16 @@ impl Panel {
                 }
             }
         }
-        self.model_items = combined_models(&self.catalogs, &self.catalog_errors, &self.selected_models, &self.provider_info);
+        let models = combined_models(&self.catalogs, &self.catalog_errors, &self.selected_models, &self.provider_info);
+        self.model_items = with_cli_help(models, &self.cli_help());
         self.model.removeAllItems();
         for (index, item) in self.model_items.iter().enumerate() {
             let title = strv(item,"title");
             self.model.addItemWithTitle(&NSString::from_str(&title));
+            if item["helper"] == true {
+                if let Some(row) = self.model.itemAtIndex(index as isize) { helper_menu_title(&row, &title); }
+                continue;
+            }
             if let Some(row) = self.model.itemAtIndex(index as isize) {
                 model_menu_title(&row, &title, item["available"] == true);
                 let state = if item["available"] == true { "사용 가능 · 연결 및 모델 목록 확인됨" } else { "사용 불가 또는 확인 필요 · 왼쪽 구독 계정 연결에서 확인" };
@@ -747,6 +810,22 @@ impl Panel {
     }
     pub fn busy(&self) -> bool {
         self.running.is_some()
+    }
+    /// 연결된 공급자의 CLI가 목록을 못 주었거나 채팅 제한을 걸 수 없을 때 모델 메뉴에 보일 이유.
+    fn cli_help(&self) -> HashMap<String, String> {
+        let connected = |provider: &str| self.provider_info["providers"].as_array()
+            .is_some_and(|a| a.iter().any(|p| p["provider"] == provider && p["installed"] == true && p["logged_in"] == true));
+        let mut help = HashMap::new();
+        for provider in ["claude", "codex", "antigravity"] {
+            if !connected(provider) { continue; }
+            let text = match self.catalog_errors.get(provider) {
+                Some(e) if e == "목록 확인 중" => continue,
+                Some(e) => format!("모델 목록 확인 실패 · {e}"),
+                None => match self.chat_blocked.get(provider) { Some(reason) => reason.clone(), None => continue },
+            };
+            help.insert(provider.to_owned(), text);
+        }
+        help
     }
     fn request(&self, op: &str) -> Value {
         json!({"op":op,"workspace_id":self.workspace,"provider":self.selected})
@@ -940,6 +1019,7 @@ impl Panel {
         let can_send = self.busy() || (
             self.workspace.is_some() && self.unsaved.is_none()
                 && versioned_model(&self.selected, self.selected_model())
+                && !self.chat_blocked.contains_key(&self.selected)
                 && self.data["needs_new"] != true
                 && (!self.input.string().to_string().trim().is_empty() || marked || !self.attachments.is_empty()));
         self.send.setEnabled(can_send);
@@ -988,9 +1068,7 @@ impl Panel {
                 "연결 확인 중…".into()
             }
         } else {
-            self.catalog_errors.get(&self.selected).filter(|_|self.catalogs_pending==0)
-                .map(|_|"모델 목록 확인 실패 · 목록 새로고침을 눌러 주세요".to_owned())
-                .unwrap_or_else(||self.connection.clone())
+            self.connection.clone()
         };
         // 평소 상태는 옅게, 오류와 저장 실패는 본문 색으로 또렷하게 보인다.
         let quiet = self.error.is_empty() && self.unsaved.is_none();
@@ -1004,7 +1082,7 @@ impl Panel {
     unsafe fn send(&mut self) {
         let marked: bool = msg_send![&self.input, hasMarkedText];
         if marked || self.busy() || self.workspace.is_none() || self.unsaved.is_some()
-            || !versioned_model(&self.selected, self.selected_model()) {
+            || !versioned_model(&self.selected, self.selected_model()) || self.chat_blocked.contains_key(&self.selected) {
             return;
         }
         let prompt = self.input.string().to_string();
@@ -1345,7 +1423,15 @@ impl Panel {
             for (provider,result) in results {
                 self.catalogs_pending = self.catalogs_pending.saturating_sub(1);
                 match result {
-                    Ok(v)=>{self.catalogs.insert(provider.clone(),v["models"].as_array().cloned().unwrap_or_default());self.catalog_errors.remove(&provider);},
+                    Ok(v)=>{
+                        let mut models=v["models"].as_array().cloned().unwrap_or_default();
+                        match v["blocked"].as_str() {
+                            // 목록은 보여 주되 회색으로 두고, 전송 대신 이유를 알린다.
+                            Some(reason)=>{for m in &mut models {m["available"]=json!(false);} self.chat_blocked.insert(provider.clone(),reason.to_owned());}
+                            None=>{self.chat_blocked.remove(&provider);}
+                        }
+                        self.catalogs.insert(provider.clone(),models);self.catalog_errors.remove(&provider);
+                    },
                     Err(e)=>{self.catalog_errors.insert(provider,e);}
                 }
             }
@@ -1369,7 +1455,9 @@ impl Panel {
    9=>{
        let index = self.model.indexOfSelectedItem() as usize;
        if !self.busy() {
-           if let Some(item) = self.model_items.get(index).cloned() {
+           if self.model_items.get(index).is_some_and(|m| m["helper"] == true) {
+               self.restore_model_selection();
+           } else if let Some(item) = self.model_items.get(index).cloned() {
                let provider = strv(&item,"provider");
                let model = strv(&item,"id");
                let result = self.save_draft().and_then(|_|rpc(json!({"op":"chat.preferences","provider":provider,"model":model})).map(|_|()));
@@ -1634,6 +1722,16 @@ mod model_menu_tests {
     }
 
     #[test]
+    fn an_updated_cli_is_checked_again_without_logging_in_again() {
+        let old = serde_json::json!({"providers":[{"provider":"claude","installed":true,"logged_in":true,"path":"/opt/homebrew/bin/claude","version":"2.1.108 (Claude Code)"}]});
+        let new = serde_json::json!({"providers":[{"provider":"claude","installed":true,"logged_in":true,"path":"/opt/homebrew/bin/claude","version":"2.1.311 (Claude Code)"}]});
+        let mut queue = super::ModelRefreshQueue::default();
+        queue.observe(&old, &old);
+        assert!(queue.take_if_idle(false).is_empty());
+        queue.observe(&old, &new);
+        assert_eq!(queue.take_if_idle(false), vec!["claude"]);
+    }
+    #[test]
     fn initial_connection_and_multiple_logins_refresh_only_connected_providers() {
         let online = serde_json::json!({"providers":[
             {"provider":"codex","installed":true,"logged_in":true},
@@ -1684,6 +1782,35 @@ mod model_menu_tests {
         assert_eq!(items.len(),2);
         let unknown=combined_models(&catalogs,&HashMap::new(),&HashMap::new(),&Value::Null);
         assert!(unknown.iter().all(|m|m["available"]==false));
+    }
+    #[test]
+    fn models_of_a_cli_that_cannot_chat_are_listed_in_gray() {
+        // 코어가 blocked를 돌려주면 tick이 각 행을 available:false로 표시한다.
+        let catalogs=HashMap::from([("codex".into(),vec![json!({"id":"gpt-6.1-terra","label":"Terra","available":false})])]);
+        let info=json!({"providers":[{"provider":"codex","installed":true,"logged_in":true}]});
+        let items=combined_models(&catalogs,&HashMap::new(),&HashMap::new(),&info);
+        assert_eq!(items.len(),1);
+        assert_eq!(items[0]["available"],false);
+    }
+    #[test]
+    fn cli_help_sits_under_its_own_provider_and_wraps() {
+        let items=vec![
+            json!({"provider":"claude","id":"claude-sonnet-5-5"}),
+            json!({"provider":"codex","id":"gpt-6.1-terra"}),
+        ];
+        let help=HashMap::from([("claude".into(),"Claude CLI 2.1.108 업데이트 필요 · 채팅 제한 옵션(--safe-mode)이 없어요. 업데이트 후 목록을 새로고침하세요.".to_owned())]);
+        let rows=with_cli_help(items,&help);
+        assert_eq!(rows.iter().map(|m|(m["provider"].as_str().unwrap(),m["helper"]==true)).collect::<Vec<_>>(),
+            [("claude",false),("claude",true),("codex",false)]);
+        assert_eq!(rows[1]["available"],false);
+        let lines=cli_help_lines(rows[1]["title"].as_str().unwrap());
+        assert!(lines.starts_with("Claude CLI 2.1.108 업데이트 필요\n"));
+        assert!(lines.lines().all(|l|l.chars().count()<=40));
+        assert!(lines.contains("(-\u{200C}-safe-mode)") && !lines.contains("--"));
+        let failed=cli_help_lines("모델 목록 확인 실패 · Codex CLI 0.171.0 응답 전 종료(종료 코드 3) · Error: bad config");
+        assert_eq!(failed.lines().collect::<Vec<_>>(),["모델 목록 확인 실패","Codex CLI 0.171.0 응답 전 종료(종료 코드 3)","Error: bad config"]);
+        // 공급자 모델이 하나도 없어도 이유는 보인다.
+        assert_eq!(with_cli_help(Vec::new(),&help).len(),1);
     }
     #[test]
     fn missing_saved_models_and_stale_catalogs_remain_visible_in_gray() {

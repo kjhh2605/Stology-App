@@ -80,7 +80,7 @@ pub fn blocks(source: &str) -> Vec<BlockLine> {
             }
             let label_width = label
                 .as_ref()
-                .map_or(26.0, |s| (s.chars().count() as f64 * 10.0 + 8.0).max(26.0));
+                .map_or(26.0, |s| (s.chars().count() as f64 * 10.0 + 4.0).max(24.0));
             Some(BlockLine {
                 bytes: start..offset,
                 prefix: start..start + pos,

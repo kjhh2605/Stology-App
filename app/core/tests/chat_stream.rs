@@ -18,7 +18,7 @@ for line in sys.stdin:
  v=json.loads(line);m=v.get('method');i=v.get('id')
  if m=='initialize':r={}
  elif m=='model/list':r={'data':[{'model':'gpt-6.1-terra','displayName':'GPT-6.1 Terra','isDefault':True,'defaultReasoningEffort':'medium','supportedReasoningEfforts':[{'reasoningEffort':'medium'},{'reasoningEffort':'high'}]}]}
- elif m=='config/read':r={'config':{'mcp_servers':{}}}
+ elif m=='config/read':r={'config':{'mcp_servers':{},'default_permissions':'stology_chat','permissions':{'stology_chat':{'network':{'enabled':False}}},'features':{'skip_host_skill_discovery':True,'hooks':False,'plugins':False}}}
  elif m in ['thread/start','thread/resume']:
   assert v['params']['model']=='gpt-6.1-terra'
   if v['params'].get('threadId')=='missing':

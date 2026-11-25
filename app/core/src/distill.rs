@@ -349,7 +349,7 @@ fn draft(root: &Path, job: &Path, c: &Connection, id: &str, w: &str, provider: &
     let skill = skills::load(root, "distill-chat", "")?;
     let helper_settings = skills::settings(root);
     let provider = skills::helper_provider(&helper_settings, "distill", provider);
-    let catalog = chat::handle(root, &json!({"op":"chat.models","provider":provider}))?["models"].as_array().cloned().unwrap_or_default();
+    let catalog = chat::usable_models(root, provider)?;
     let settings = skills::settings(root);
     let stages = skills::stage_plan_for(root, provider, settings["organize_mode"].as_str().unwrap_or("auto"), &catalog, &["distill"])?;
     let stage = &stages["stages"]["distill"];

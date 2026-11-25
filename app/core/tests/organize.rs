@@ -24,6 +24,7 @@ if 'app-server' in a:
   elif m=='model/list':
    e=[{'reasoningEffort':x} for x in ['low','medium','high']]
    r={'data':[{'model':n,'displayName':n,'isDefault':n=='gpt-6.1-sol','defaultReasoningEffort':'medium','supportedReasoningEfforts':e} for n in ['gpt-6.1-sol','gpt-6.1-terra','gpt-6-luna']]}
+  elif m=='config/read':r={'config':{'mcp_servers':{},'default_permissions':'stology_chat','permissions':{'stology_chat':{'network':{'enabled':False}}},'features':{'skip_host_skill_discovery':True,'hooks':False,'plugins':False}}}
   else:continue
   print(json.dumps({'id':i,'result':r}),flush=True)
  sys.exit(0)

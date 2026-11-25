@@ -348,13 +348,14 @@ fn check_effort(item: &Value, effort: &str) -> Result<()> {
     anyhow::ensure!(effort.is_empty() || item["efforts"].as_array().is_some_and(|a| a.iter().any(|v| v == effort)), "이 모델은 선택한 effort를 지원하지 않습니다. 단계를 다시 선택하세요.");
     Ok(())
 }
-fn claude_model_list(items: &[Value]) -> Result<Vec<Value>> {
+/// Entries with an ID Stology cannot pass on are left out rather than failing the list.
+fn claude_model_list(items: &[Value]) -> Vec<Value> {
     let mut list = Vec::new();
     for item in items {
-        let alias = item["value"].as_str().context("Claude 모델 ID 없음")?;
+        let Some(alias) = item["value"].as_str() else { continue };
         let resolved = item["resolvedModel"].as_str().unwrap_or(alias);
         let id = if alias == "default" { "" } else { resolved };
-        validate_model("claude", id)?;
+        if validate_model("claude", id).is_err() { continue; }
         let label = item["displayName"].as_str().unwrap_or(id);
         let efforts: Vec<_> = item["supportedEffortLevels"].as_array().into_iter().flatten()
             .filter_map(Value::as_str).filter(|e| !e.is_empty() && validate_effort(e).is_ok()).collect();
@@ -368,65 +369,241 @@ fn claude_model_list(items: &[Value]) -> Result<Vec<Value>> {
             list.push(automatic);
         }
     }
-    Ok(list)
+    list
 }
 fn selected_model(c: &Connection, provider: &str) -> Result<String> {
     use rusqlite::OptionalExtension;
     Ok(c.query_row("SELECT value FROM preferences WHERE key=?1", [format!("model.{provider}")], |r| r.get(0)).optional()?.unwrap_or_default())
 }
 /// Query metadata only; no thread or inference is created. The caller runs off the UI thread.
+/// The chat options are tried first so the reply also says whether a turn can start. An older
+/// CLI that refuses them may still list its models; chat then stays blocked with the reason.
 fn models(root: &Path, provider: &str) -> Result<Value> {
     anyhow::ensure!(["codex", "claude", "antigravity"].contains(&provider), "지원하지 않는 공급자");
     if provider == "antigravity" { return super::antigravity::models(root); }
+    match query(root, provider, Probe::Chat) {
+        Ok(list) => Ok(json!({"models":list})),
+        Err(chat) if chat.unsupported => match query(root, provider, Probe::List) {
+            Ok(list) => Ok(json!({"models":list,"blocked":chat.message})),
+            Err(_) => bail!("{}", chat.message),
+        },
+        Err(e) => bail!("{}", e.message),
+    }
+}
+/// Models for work that runs with the chat restrictions. A CLI that cannot apply
+/// them is refused here, before any user input reaches it.
+pub(crate) fn usable_models(root: &Path, provider: &str) -> Result<Vec<Value>> {
+    if provider == "antigravity" {
+        return Ok(models(root, provider)?["models"].as_array().cloned().unwrap_or_default());
+    }
+    anyhow::ensure!(["codex", "claude"].contains(&provider), "지원하지 않는 공급자");
+    query(root, provider, Probe::Chat).map_err(|e| anyhow::anyhow!(e.message))
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Probe {
+    /// The fewest options that still keep personal settings, hooks and MCP servers out.
+    List,
+    /// Exactly the options a chat turn starts with.
+    Chat,
+}
+/// How a model query stopped short.
+#[derive(Debug)]
+enum Stop {
+    Timeout,
+    Closed,
+    Format(String),
+    Provider(String),
+    /// Codex accepted the options but reported this restriction as not in effect.
+    Restriction(String),
+    Empty,
+}
+#[derive(Debug)]
+struct CliError {
+    /// The installed version lacks something chat depends on; listing may still work.
+    unsupported: bool,
+    message: String,
+}
+fn cli_name(p: &str) -> &'static str {
+    if p == "claude" { "Claude" } else { "Codex" }
+}
+/// A line of CLI output fit to show: the home folder and token-like words are hidden.
+fn redact(line: &str) -> String {
+    let home = std::env::var("HOME").ok().filter(|h| h.len() > 1);
+    let line = match home { Some(h) => line.trim().replace(&h, "~"), None => line.trim().to_owned() };
+    line.split(' ')
+        .map(|w| {
+            let token = w.len() >= 24 && w.bytes().any(|b| b.is_ascii_digit()) && w.bytes().any(|b| b.is_ascii_alphabetic())
+                && w.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.+=".contains(&b));
+            if token { "[가림]" } else { w }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(200)
+        .collect()
+}
+/// The option an older CLI refused, when that is why it stopped.
+fn rejected_option(stderr: &str) -> Option<String> {
+    let lower = stderr.to_ascii_lowercase();
+    ["unknown feature flag:", "unknown option", "unexpected argument", "unrecognized option", "allowed choices are"].iter().find_map(|marker| {
+        let at = lower.find(marker)? + marker.len();
+        let word = if *marker == "allowed choices are" { "" } else { stderr[at..].split_whitespace().next().unwrap_or("") };
+        Some(word.trim_matches(|c: char| "'\"`,.:;".contains(c)).to_owned())
+    })
+}
+fn cli_error(root: &Path, p: &str, probe: Probe, stop: Stop, stderr: &str, exit: Option<std::process::ExitStatus>) -> CliError {
+    let name = cli_name(p);
+    let cli = match super::providers::version(root, p) { Some(v) => format!("{name} CLI {v}"), None => format!("{name} CLI") };
+    let lower = stderr.to_ascii_lowercase();
+    let detail = stderr.lines().map(str::trim).find(|l| l.to_ascii_lowercase().contains("error"))
+        .or_else(|| stderr.lines().map(str::trim).find(|l| !l.is_empty())).map(redact);
+    // 모델 메뉴 도움말은 " · " 앞을 첫 줄로 쓰므로 무엇을 할지를 앞에 둔다.
+    if let Some(option) = rejected_option(stderr) {
+        let need = if probe == Probe::Chat { "채팅 제한 옵션" } else { "목록 조회 옵션" };
+        let option = if option.is_empty() { String::new() } else { format!("({})", redact(&option)) };
+        return CliError { unsupported: true, message: format!("{cli} 업데이트 필요 · {need}{option}이 없어요. 업데이트 후 목록을 새로고침하세요.") };
+    }
+    if let Stop::Restriction(what) = &stop {
+        return CliError { unsupported: true, message: format!("{cli} 업데이트 필요 · 채팅 제한({what})이 적용되지 않았어요. 업데이트나 관리 정책 확인 후 목록을 새로고침하세요.") };
+    }
+    let auth = ["not logged in", "unauthorized", "authentication", "token expired", "please log in", "login required"].iter().any(|s| lower.contains(s));
+    let message = match stop {
+        _ if auth => format!("{cli} 로그인을 확인하지 못했어요. 왼쪽 구독 계정 연결에서 다시 로그인하세요."),
+        Stop::Timeout => format!("{cli} 응답 없음 · 15초 안에 모델 목록이 오지 않았어요. 목록을 새로고침하세요."),
+        Stop::Format(line) => format!("{cli} 응답 형식 불일치 · {}. 업데이트 후 목록을 새로고침하세요.", redact(&line)),
+        Stop::Provider(error) => format!("{cli} 목록 요청 거절 · {}", redact(&error)),
+        Stop::Empty => format!("{cli}에서 선택 가능한 모델을 받지 못했어요."),
+        Stop::Closed | Stop::Restriction(_) => {
+            let code = exit.and_then(|s| s.code()).map(|c| format!("(종료 코드 {c})")).unwrap_or_default();
+            let detail = detail.map(|d| format!(" · {d}")).unwrap_or_default();
+            format!("{cli} 응답 전 종료{code}{detail}")
+        }
+    };
+    CliError { unsupported: false, message }
+}
+/// Lists models without the chat options, for a CLI too old to accept them.
+fn list_command(root: &Path, p: &str, work: &Path) -> Result<Command> {
+    let binary = super::providers::bin(root, p).context("공식 CLI가 없습니다. 연결에서 설치하세요.")?;
+    let mut cmd = super::providers::clean_command(&binary);
+    cmd.current_dir(work).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+    if p == "codex" {
+        // `-c features.*` is ignored rather than refused when a feature does not exist yet.
+        cmd.args(["app-server", "--stdio", "-c", "features.hooks=false", "-c", "features.plugins=false", "-c", "features.apps=false", "-c", "mcp_servers={}"]);
+    } else {
+        cmd.args(["--print", "--tools", "", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}",
+            "--setting-sources", "", "--no-session-persistence", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]);
+    }
+    Ok(cmd)
+}
+fn query(root: &Path, p: &str, probe: Probe) -> std::result::Result<Vec<Value>, CliError> {
     let work = root.join("model-discovery");
-    fs::create_dir_all(&work)?;
-    let mut cmd = command(root, provider, &work, None, "", "")?;
-    if provider == "claude" { cmd.arg("--no-session-persistence"); }
-    let mut child = Process(cmd.spawn()?);
+    let spawned = fs::create_dir_all(&work).map_err(anyhow::Error::from).and_then(|_| {
+        let mut cmd = if probe == Probe::Chat { command(root, p, &work, None, "", "")? } else { list_command(root, p, &work)? };
+        if probe == Probe::Chat && p == "claude" { cmd.arg("--no-session-persistence"); }
+        Ok(Process(cmd.spawn().context("CLI 실행 실패")?))
+    });
+    let mut child = spawned.map_err(|e| CliError { unsupported: false, message: format!("{e:#}") })?;
     let mut input = child.0.stdin.take().unwrap();
     let output = child.0.stdout.take().unwrap();
     let err = child.0.stderr.take().unwrap();
-    thread::spawn(move || { let _ = std::io::copy(&mut BufReader::new(err), &mut std::io::sink()); });
+    let (err_tx, err_rx) = mpsc::channel();
+    thread::spawn(move || {
+        use std::io::Read;
+        let mut reader = BufReader::new(err);
+        let mut text = String::new();
+        let _ = reader.by_ref().take(64 * 1024).read_to_string(&mut text);
+        let _ = err_tx.send(text);
+        let _ = std::io::copy(&mut reader, &mut std::io::sink());
+    });
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || { for line in BufReader::new(output).lines() { if tx.send(line).is_err() { break; } } });
-    if provider == "claude" {
-        writeln!(input, "{}", json!({"type":"control_request","request_id":"models","request":{"subtype":"initialize"}}))?;
-        input.flush()?;
+    let stop = match converse(p, probe, &mut input, &rx) {
+        Ok(list) => return Ok(list),
+        Err(stop) => stop,
+    };
+    drop(input);
+    let mut exit = None;
+    if matches!(stop, Stop::Closed) {
+        let until = Instant::now() + Duration::from_secs(1);
+        while exit.is_none() && Instant::now() < until {
+            exit = child.0.try_wait().ok().flatten();
+            if exit.is_none() { thread::sleep(Duration::from_millis(20)); }
+        }
+    }
+    drop(child);
+    let stderr = err_rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+    Err(cli_error(root, p, probe, stop, &stderr, exit))
+}
+fn converse(p: &str, probe: Probe, input: &mut impl Write, rx: &mpsc::Receiver<std::io::Result<String>>) -> std::result::Result<Vec<Value>, Stop> {
+    let request = |input: &mut dyn Write, id: i64, method: &str, params: Value| {
+        writeln!(input, "{}", json!({"id":id,"method":method,"params":params})).and_then(|_| input.flush()).map_err(|_| Stop::Closed)
+    };
+    if p == "claude" {
+        writeln!(input, "{}", json!({"type":"control_request","request_id":"models","request":{"subtype":"initialize"}}))
+            .and_then(|_| input.flush()).map_err(|_| Stop::Closed)?;
     } else {
-        write_request(&mut input, 1, "initialize", json!({"clientInfo":{"name":"stology_models","version":"0.1.0"}}))?;
+        request(input, 1, "initialize", json!({"clientInfo":{"name":"stology_models","version":"0.1.0"}}))?;
     }
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut list = Vec::new();
     loop {
-        let line = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).context("모델 목록을 가져오지 못했습니다. 목록을 다시 불러오세요.")??;
-        let v: Value = serde_json::from_str(&line)?;
-        anyhow::ensure!(v["error"].is_null(), "모델 목록 조회 실패: {}", v["error"]);
-        if provider == "claude" {
+        let line = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Ok(line)) => line,
+            Ok(Err(e)) => return Err(Stop::Format(e.to_string())),
+            Err(mpsc::RecvTimeoutError::Timeout) => return Err(Stop::Timeout),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(Stop::Closed),
+        };
+        let v: Value = serde_json::from_str(&line).map_err(|_| Stop::Format(line.clone()))?;
+        if !v["error"].is_null() { return Err(Stop::Provider(v["error"].to_string())); }
+        if p == "claude" {
             if v["type"] == "control_response" && v["response"]["request_id"] == "models" {
-                anyhow::ensure!(v["response"]["subtype"] == "success", "Claude 모델 목록 조회 실패");
-                list = claude_model_list(v["response"]["response"]["models"].as_array().context("Claude 모델 목록 응답 없음")?)?;
+                if v["response"]["subtype"] != "success" { return Err(Stop::Provider(v["response"]["error"].to_string())); }
+                list = claude_model_list(v["response"]["response"]["models"].as_array().ok_or_else(|| Stop::Format("initialize 응답에 models 없음".into()))?);
                 break;
             }
             continue;
         }
         if v["id"] == 1 {
-            writeln!(input, "{}", json!({"method":"initialized"}))?;
-            write_request(&mut input, 2, "model/list", json!({"limit":100}))?;
+            writeln!(input, "{}", json!({"method":"initialized"})).map_err(|_| Stop::Closed)?;
+            if probe == Probe::Chat {
+                request(input, 3, "config/read", json!({"includeLayers":false}))?;
+            } else {
+                request(input, 2, "model/list", json!({"limit":100}))?;
+            }
+        } else if v["id"] == 3 {
+            codex_restrictions(&v["result"]["config"]).map_err(Stop::Restriction)?;
+            request(input, 2, "model/list", json!({"limit":100}))?;
         } else if v["id"] == 2 {
-            for item in v["result"]["data"].as_array().context("모델 목록 응답 없음")? {
+            for item in v["result"]["data"].as_array().ok_or_else(|| Stop::Format("model/list 응답에 data 없음".into()))? {
                 if item["hidden"] == true { continue; }
-                if let Some(id) = item["model"].as_str() {
-                    validate_model(provider, id)?;
+                if let Some(id) = item["model"].as_str().filter(|id| validate_model(p, id).is_ok()) {
                     list.push(json!({"id":id,"label":item["displayName"].as_str().unwrap_or(id),"default":item["isDefault"]==true,"default_effort":item["defaultReasoningEffort"],"efforts":item["supportedReasoningEfforts"].as_array().into_iter().flatten().filter_map(|e|e["reasoningEffort"].as_str()).collect::<Vec<_>>()}));
                 }
             }
             if let Some(cursor) = v["result"]["nextCursor"].as_str().filter(|s| !s.is_empty()) {
-                write_request(&mut input, 2, "model/list", json!({"limit":100,"cursor":cursor}))?;
+                request(input, 2, "model/list", json!({"limit":100,"cursor":cursor}))?;
             } else { break; }
         }
     }
-    anyhow::ensure!(!list.is_empty(), "선택 가능한 모델이 없습니다");
-    Ok(json!({"models":list}))
+    if list.is_empty() { Err(Stop::Empty) } else { Ok(list) }
+}
+/// Codex ignores `-c` keys it does not know, so the configuration it reports back is checked.
+fn codex_restrictions(config: &Value) -> std::result::Result<(), String> {
+    let features = &config["features"];
+    if features["skip_host_skill_discovery"] != true {
+        return Err("skip_host_skill_discovery".into());
+    }
+    if let Some(flag) = CODEX_DISABLED.iter().find(|f| features[**f] == true) {
+        return Err((*flag).into());
+    }
+    if config["default_permissions"] != "stology_chat" {
+        return Err("default_permissions".into());
+    }
+    if config["permissions"]["stology_chat"]["network"]["enabled"] != false {
+        return Err("permissions.stology_chat.network".into());
+    }
+    Ok(())
 }
 
 struct Process(Child);
@@ -445,6 +622,30 @@ fn write_request(w: &mut impl Write, id: i64, method: &str, params: Value) -> Re
     w.flush()?;
     Ok(())
 }
+/// Codex features a chat turn turns off. `codex_restrictions` checks none came back on.
+const CODEX_DISABLED: [&str; 21] = [
+    "hooks",
+    "plugins",
+    "apps",
+    "shell_tool",
+    "unified_exec",
+    "browser_use",
+    "computer_use",
+    "image_generation",
+    "multi_agent",
+    "multi_agent_v2",
+    "memories",
+    "skill_search",
+    "code_mode",
+    "js_repl",
+    "view_image",
+    "sleep_tool",
+    "tool_suggest",
+    "request_permissions_tool",
+    "external_agent_memory_import",
+    "agent_message_board",
+    "agent_message_board_mcp",
+];
 const INSTRUCTIONS:&str="You are Stology's study assistant. Answer the user's text in their language. Only the conversation, including any images the user attached, is available. Do not claim access to files, documents or tools. Do not execute tools.";
 fn command(root: &Path, p: &str, work: &Path, session: Option<&str>, model: &str, effort: &str) -> Result<Command> {
     let binary =
@@ -457,29 +658,7 @@ fn command(root: &Path, p: &str, work: &Path, session: Option<&str>, model: &str
         .process_group(0);
     if p == "codex" {
         cmd.args(["app-server", "--stdio"]);
-        for flag in [
-            "hooks",
-            "plugins",
-            "apps",
-            "shell_tool",
-            "unified_exec",
-            "browser_use",
-            "computer_use",
-            "image_generation",
-            "multi_agent",
-            "multi_agent_v2",
-            "memories",
-            "skill_search",
-            "code_mode",
-            "js_repl",
-            "view_image",
-            "sleep_tool",
-            "tool_suggest",
-            "request_permissions_tool",
-            "external_agent_memory_import",
-            "agent_message_board",
-            "agent_message_board_mcp",
-        ] {
+        for flag in CODEX_DISABLED {
             cmd.args(["--disable", flag]);
         }
         for conf in [
@@ -556,6 +735,7 @@ fn friendly_error(message: &str, diagnostic: &str) -> String {
         "unexpected argument",
         "unknown option",
         "unrecognized option",
+        "unknown feature flag",
     ]
     .iter()
     .any(|s| all.contains(s))
@@ -621,9 +801,9 @@ fn run(
     validate_model(p, &model)?;
     let effort = r["effort"].as_str().map(str::to_owned).unwrap_or(selected_effort(&c, p, &model)?);
     validate_effort(&effort)?;
-    // Resolve versions and verify effort against current CLI capabilities before inference.
-    let catalog = models(root, p)?;
-    let items = catalog["models"].as_array().context("모델 목록 없음")?;
+    // Resolve versions, verify effort and check that the CLI accepts the chat
+    // restrictions before anything is recorded or sent.
+    let items = usable_models(root, p)?;
     let item = items.iter().find(|m| if p == "codex" && model.is_empty() { m["default"] == true } else { m["id"] == model })
         .context("선택한 모델이 현재 CLI 목록에 없습니다. 모델을 다시 선택하세요.")?;
     check_effort(item, &effort)?;
@@ -787,6 +967,8 @@ fn run(
                     write_request(&mut input, 4, "config/read", json!({"includeLayers":false}))?;
                 }
                 if v["id"] == 4 {
+                    codex_restrictions(&v["result"]["config"]).map_err(|what| anyhow::anyhow!(
+                        "Codex CLI 업데이트 필요 · 채팅 제한({what})이 적용되지 않아 질문을 보내지 않았어요."))?;
                     let mut config = json!({"model_provider":"openai","web_search":"disabled","project_doc_max_bytes":0});
                     if let Some(servers) = v["result"]["config"]["mcp_servers"].as_object() {
                         for name in servers.keys() {
@@ -1052,6 +1234,107 @@ mod tests {
         assert!(attached_images(&json!({"images":[{"mime":"image/png","data":"not base64!"}]})).is_err());
         let many: Vec<_> = (0..=MAX_IMAGES).map(|_| json!({"mime":"image/png","data":"AAAA"})).collect();
         assert!(attached_images(&json!({"images":many})).is_err());
+    }
+    fn fake_cli(root: &Path, name: &str, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = root.join("runtime/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let path = bin.join(name);
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[test]
+    fn the_two_reported_refusals_are_told_apart() {
+        let codex = rejected_option("Error: Unknown feature flag: skip_host_skill_discovery\n").unwrap();
+        let claude = rejected_option("error: unknown option '--safe-mode'\n").unwrap();
+        assert_eq!(codex, "skip_host_skill_discovery");
+        assert_eq!(claude, "--safe-mode");
+        assert_eq!(rejected_option("error: unexpected argument '--foo' found").unwrap(), "--foo");
+        assert!(rejected_option("Error: not logged in").is_none());
+        let d = tempfile::tempdir().unwrap();
+        let a = cli_error(d.path(), "codex", Probe::Chat, Stop::Closed, "Error: Unknown feature flag: skip_host_skill_discovery", None);
+        let b = cli_error(d.path(), "claude", Probe::Chat, Stop::Closed, "error: unknown option '--safe-mode'", None);
+        assert!(a.unsupported && b.unsupported);
+        assert!(a.message.starts_with("Codex CLI") && a.message.contains("(skip_host_skill_discovery)") && a.message.contains("업데이트"));
+        assert!(b.message.starts_with("Claude CLI") && b.message.contains("(--safe-mode)"));
+        let auth = cli_error(d.path(), "claude", Probe::Chat, Stop::Closed, "Error: Not logged in", None);
+        assert!(!auth.unsupported && auth.message.contains("로그인"));
+        assert!(cli_error(d.path(), "codex", Probe::List, Stop::Timeout, "", None).message.contains("15초"));
+    }
+    #[test]
+    fn diagnostics_hide_home_and_tokens() {
+        let home = std::env::var("HOME").unwrap();
+        let shown = redact(&format!("failed at {home}/.codex/auth.json with sk-proj4f8a9b2c7d1e3f5a6b8c9d0e1f2"));
+        assert!(!shown.contains(&home) && shown.contains("~/.codex/auth.json"));
+        assert!(shown.contains("[가림]") && !shown.contains("sk-proj4f8a"));
+        assert_eq!(redact("Unknown feature flag: skip_host_skill_discovery"), "Unknown feature flag: skip_host_skill_discovery");
+        assert!(redact(&"x".repeat(500)).chars().count() <= 200);
+    }
+    #[test]
+    fn codex_settings_it_quietly_ignored_block_chat() {
+        let mut config = json!({"default_permissions":"stology_chat","permissions":{"stology_chat":{"network":{"enabled":false}}},
+            "features":{"skip_host_skill_discovery":true,"hooks":false,"plugins":false}});
+        assert!(codex_restrictions(&config).is_ok());
+        config["features"]["hooks"] = json!(true);
+        assert_eq!(codex_restrictions(&config).unwrap_err(), "hooks");
+        config["features"]["hooks"] = json!(false);
+        config["permissions"] = json!({});
+        assert_eq!(codex_restrictions(&config).unwrap_err(), "permissions.stology_chat.network");
+        config["default_permissions"] = Value::Null;
+        assert_eq!(codex_restrictions(&config).unwrap_err(), "default_permissions");
+        assert_eq!(codex_restrictions(&json!({})).unwrap_err(), "skip_host_skill_discovery");
+    }
+    #[test]
+    fn an_older_claude_lists_models_but_chat_and_jobs_are_refused_first() {
+        let d = tempfile::tempdir().unwrap();
+        fake_cli(d.path(), "claude", r#"#!/bin/sh
+[ "$1" = "--version" ] && { echo "2.1.108 (Claude Code)"; exit 0; }
+case " $* " in *" --safe-mode "*) echo "error: unknown option '--safe-mode'" >&2; exit 1;; esac
+read line
+echo '{"type":"control_response","response":{"subtype":"success","request_id":"models","response":{"models":[{"value":"default","displayName":"Default"},{"value":"sonnet[1m]","displayName":"Sonnet 1M"},{"value":"claude-sonnet-4-6","displayName":"Sonnet 4.6","supportedEffortLevels":["low","high"]}]}}}'
+"#);
+        let v = handle(d.path(), &json!({"op":"chat.models","provider":"claude"})).unwrap();
+        let ids: Vec<_> = v["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["", "claude-sonnet-4-6"]);
+        let blocked = v["blocked"].as_str().unwrap();
+        assert!(blocked.starts_with("Claude CLI 2.1.108 업데이트 필요") && blocked.contains("(--safe-mode)"));
+        let refused = usable_models(d.path(), "claude").unwrap_err().to_string();
+        assert!(refused.contains("--safe-mode"));
+        // A turn is refused before it is recorded.
+        let ws = uuid::Uuid::new_v4().to_string();
+        let (_tx, rx) = mpsc::channel();
+        let mut out = Vec::new();
+        let r = json!({"workspace_id":ws,"provider":"claude","model":"claude-sonnet-4-6","text":"안녕"});
+        assert!(run(d.path(), &r, &rx, &mut out).unwrap_err().to_string().contains("--safe-mode"));
+        assert!(out.is_empty());
+        let turns: i64 = db(d.path()).unwrap().query_row("SELECT count(*) FROM turns", [], |r| r.get(0)).unwrap();
+        assert_eq!(turns, 0);
+    }
+    #[test]
+    fn a_codex_that_drops_the_permission_profile_lists_models_but_is_blocked() {
+        let d = tempfile::tempdir().unwrap();
+        fake_cli(d.path(), "codex", r#"#!/bin/sh
+[ "$1" = "--version" ] && { echo "codex-cli 0.150.0"; exit 0; }
+while read line; do
+  case "$line" in
+    *'"initialize"'*) echo '{"id":1,"result":{}}';;
+    *'"config/read"'*) echo '{"id":3,"result":{"config":{"features":{"skip_host_skill_discovery":true,"hooks":false}}}}';;
+    *'"model/list"'*) echo '{"id":2,"result":{"data":[{"model":"gpt-6.1-terra","displayName":"Terra","isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"low"}]},{"model":"bad id!","displayName":"x"}]}}';;
+  esac
+done
+"#);
+        let v = handle(d.path(), &json!({"op":"chat.models","provider":"codex"})).unwrap();
+        assert_eq!(v["models"].as_array().unwrap().len(), 1);
+        assert_eq!(v["models"][0]["id"], "gpt-6.1-terra");
+        assert!(v["blocked"].as_str().unwrap().contains("(default_permissions)"));
+        assert!(usable_models(d.path(), "codex").is_err());
+    }
+    #[test]
+    fn a_cli_that_quits_unexplained_reports_its_exit_and_stderr() {
+        let d = tempfile::tempdir().unwrap();
+        fake_cli(d.path(), "codex", "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo 'codex-cli 0.171.0'; exit 0; }\necho 'Error: config.toml is broken' >&2\nexit 3\n");
+        let e = handle(d.path(), &json!({"op":"chat.models","provider":"codex"})).unwrap_err().to_string();
+        assert!(e.contains("Codex CLI 0.171.0") && e.contains("종료 코드 3") && e.contains("config.toml is broken"), "{e}");
     }
     #[test]
     fn provider_errors_offer_specific_next_steps() {

@@ -47,7 +47,19 @@ unsafe fn input_command(text: &NSTextView, command: markdown_input::Command) -> 
     }
     let selection: NSRange = msg_send![text, selectedRange];
     if selection.length != 0 {
-        return false;
+        if !matches!(command, markdown_input::Command::Tab | markdown_input::Command::BackTab) {
+            return false;
+        }
+        let source = text.string().to_string();
+        let start = byte_for_utf16(&source, selection.location);
+        let end = byte_for_utf16(&source, selection.location.saturating_add(selection.length));
+        let Some(edit) = markdown_input::indent_selected_numbers(
+            &source, start..end, command == markdown_input::Command::BackTab,
+        ) else { return false };
+        if text.selectedRanges().count() == 1 && (!edit.range.is_empty() || !edit.replacement.is_empty()) {
+            apply_source_edit(text, edit);
+        }
+        return true;
     }
     let source = text.string().to_string();
     let at = byte_for_utf16(&source, selection.location);
@@ -1848,8 +1860,8 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 native.ivars().list_labels.borrow_mut().push((
                     label.clone(),
                     NSPoint::new(
-                        EDITOR_INSET + LINE_PADDING + block.indent - width - 8.0,
-                        frame.origin.y + if label == "•" { 3.0 - (size - 16.0) / 2.0 } else { 1.0 },
+                        EDITOR_INSET + LINE_PADDING + block.indent - width - 4.0,
+                        frame.origin.y + if label == "•" { 3.0 - (size - 16.0) / 2.0 } else { 5.0 },
                     ),
                     size,
                 ));

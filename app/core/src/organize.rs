@@ -175,7 +175,7 @@ fn plan(root: &Path, req: &Value) -> Result<Value> {
     if let Some(ids) = &chosen {
         anyhow::ensure!(targets == ids.len(), "{}", materials.iter().find_map(|m| m["unreadable"].as_str()).unwrap_or("선택한 자료를 찾을 수 없습니다"));
     }
-    let catalog = crate::chat::handle(root, &json!({"op":"chat.models","provider":provider}))?["models"].as_array().cloned().unwrap_or_default();
+    let catalog = crate::chat::usable_models(root, &provider)?;
     let mut stages = skills::stage_plan_for(root, &provider, &mode, &catalog, if single { &["extract"] } else { &["extract", "align", "connect", "review"] })?;
     if reread && stages["stages"]["extract"]["tier"] != "custom" {
         if let Some((tier, model)) = skills::highest(&stages["tiers"]) {

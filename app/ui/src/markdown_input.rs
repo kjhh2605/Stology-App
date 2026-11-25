@@ -27,22 +27,22 @@ fn leading_indent(line: &str) -> usize {
         .count()
 }
 
-/// Move the item and its contiguous children together, never inserting a tab
-/// into the visible text. Two spaces are one bullet nesting level.
-fn indent_item(source: &str, start: usize, caret: usize, outdent: bool) -> Edit {
+/// Prefix changes for an item and its contiguous children, in source coordinates.
+fn item_indents(
+    source: &str,
+    start: usize,
+    outdent: bool,
+) -> impl Iterator<Item = (usize, isize)> + '_ {
     let line = source[start..].split('\n').next().unwrap_or("");
     let indent = leading_indent(line);
-    let remove = if line.starts_with('\t') {
-        1
+    let shift = if outdent {
+        -(if line.starts_with('\t') {
+            1
+        } else {
+            indent.min(2)
+        } as isize)
     } else {
-        indent.min(2)
-    };
-    if outdent && remove == 0 {
-        return insert(caret, "");
-    }
-    if !outdent {
-        // An isolated first item may move right once. Deeper indentation needs
-        // a preceding parent, otherwise CommonMark turns it into literal code.
+        // Without a preceding parent, deeper indentation becomes literal code.
         let previous = source[..start].lines().rev().find(|s| !s.trim().is_empty());
         let limit = previous
             .and_then(|s| {
@@ -51,33 +51,110 @@ fn indent_item(source: &str, start: usize, caret: usize, outdent: bool) -> Edit 
                     .map(|_| leading_indent(s) + 2)
             })
             .unwrap_or(2);
-        if indent + 2 > limit {
-            return insert(caret, "");
+        if indent + 2 <= limit {
+            2
+        } else {
+            0
+        }
+    };
+    source[start..]
+        .split_inclusive('\n')
+        .enumerate()
+        .take_while(move |(i, raw)| {
+            *i == 0 || (!raw.trim().is_empty() && leading_indent(raw) > indent)
+        })
+        .scan(start, move |offset, (_, raw)| {
+            let at = *offset;
+            *offset += raw.len();
+            Some((at, shift))
+        })
+}
+
+/// Apply the prefix changes as one undoable edit. Rebase both selection ends
+/// over inserted spaces or the portion of a removed prefix preceding the end.
+fn indent_edit(
+    source: &str,
+    selection: Range<usize>,
+    changes: impl IntoIterator<Item = (usize, isize)>,
+) -> super::markdown_shortcuts::Edit {
+    let mut start = None;
+    let mut end = selection.start;
+    let mut replacement = String::new();
+    let mut after = selection.clone();
+    for (at, shift) in changes {
+        if shift == 0 {
+            continue;
+        }
+        if start.is_some() {
+            replacement.push_str(&source[end..at]);
+        }
+        start.get_or_insert(at);
+        let remove = (-shift).max(0) as usize;
+        end = at + remove;
+        if shift > 0 {
+            replacement.push_str("  ");
+        }
+        let delta = |pos: usize| {
+            if pos < at {
+                0
+            } else if shift > 0 {
+                shift
+            } else {
+                -(remove.min(pos - at) as isize)
+            }
+        };
+        after.start = after.start.saturating_add_signed(delta(selection.start));
+        // A selection ending at the next line start excludes that line's prefix.
+        if selection.is_empty() || selection.end != at || shift < 0 {
+            after.end = after.end.saturating_add_signed(delta(selection.end));
         }
     }
-    let mut end = start;
-    let mut replacement = String::new();
-    for (index, raw) in source[start..].split_inclusive('\n').enumerate() {
-        if index > 0 && (raw.trim().is_empty() || leading_indent(raw) <= indent) {
+    super::markdown_shortcuts::Edit {
+        range: start.unwrap_or(end)..end,
+        replacement,
+        selection: after,
+    }
+}
+
+fn indent_item(source: &str, start: usize, caret: usize, outdent: bool) -> Edit {
+    let edit = indent_edit(source, caret..caret, item_indents(source, start, outdent));
+    Edit {
+        range: edit.range,
+        replacement: edit.replacement,
+        caret: edit.selection.start,
+    }
+}
+
+/// Only displayed numbered items participate. A selected parent's children
+/// move with it, including children outside the selection, exactly once.
+pub fn indent_selected_numbers(
+    source: &str,
+    selection: Range<usize>,
+    outdent: bool,
+) -> Option<super::markdown_shortcuts::Edit> {
+    let mut changes = Vec::new();
+    for block in super::markdown_shortcuts::blocks(source) {
+        let at = block.bytes.start;
+        if at >= selection.end {
             break;
         }
-        if outdent {
-            replacement.push_str(&raw[remove.min(leading_indent(raw))..]);
-        } else {
-            replacement.push_str("  ");
-            replacement.push_str(raw);
+        if block.bytes.end <= selection.start
+            || block.quote_depth != 0
+            || !source[block.prefix]
+                .trim_start()
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_digit)
+            || changes.last().is_some_and(|&(last, _)| at <= last)
+        {
+            continue;
         }
-        end += raw.len();
+        changes.extend(item_indents(source, at, outdent));
     }
-    Edit {
-        range: start..end,
-        replacement,
-        caret: if outdent {
-            caret.saturating_sub(remove).max(start)
-        } else {
-            caret + 2
-        },
+    if changes.is_empty() {
+        return None;
     }
+    Some(indent_edit(source, selection, changes))
 }
 
 #[derive(Debug)]
@@ -478,8 +555,7 @@ pub fn command(source: &str, caret: usize, command: Command) -> Option<Edit> {
         return None;
     }
     let indent = leading_indent(line);
-    let bullet = matches!(line.as_bytes().get(indent), Some(b'-' | b'+' | b'*')) && !prefix.quote;
-    if bullet && matches!(command, Command::Tab | Command::BackTab) {
+    if !prefix.quote && matches!(command, Command::Tab | Command::BackTab) {
         let literal_code =
             pulldown_cmark::Parser::new(source)
                 .into_offset_iter()
@@ -597,6 +673,40 @@ mod tests {
         assert!(command("```\n- code\n```", 10, Command::BackTab).is_none());
         assert!(command("    - literal", 13, Command::Tab).is_none());
     }
+    #[test]
+    fn numbered_tab_preserves_partial_selection_and_moves_each_item_once() {
+        for newline in ["\n", "\r\n"] {
+            let source = ["1. 부모", "2. 앞 한글😀 뒤", "   - 하위", "3) 마지막", "4. 다음"].join(newline);
+            let range = source.find("한글").unwrap()..source.find("4.").unwrap();
+            let edit = indent_selected_numbers(&source, range.clone(), false).unwrap();
+            let mut result = source.clone();
+            result.replace_range(edit.range, &edit.replacement);
+            assert_eq!(result, ["1. 부모", "  2. 앞 한글😀 뒤", "     - 하위", "  3) 마지막", "4. 다음"].join(newline));
+            assert_eq!(edit.selection, result.find("한글").unwrap()..result.find("4.").unwrap());
+            let edit = indent_selected_numbers(&result, edit.selection, true).unwrap();
+            result.replace_range(edit.range, &edit.replacement);
+            assert_eq!((result, edit.selection), (source, range));
+        }
+    }
+
+    #[test]
+    fn numbered_tab_keeps_text_selected_at_indent_limit_and_skips_literal_code() {
+        let source = "  1. 앞😀뒤\n     - 하위";
+        let start = source.find('😀').unwrap();
+        let selection = start..start + '😀'.len_utf8();
+        let edit = indent_selected_numbers(source, selection.clone(), false).unwrap();
+        assert!(edit.range.is_empty() && edit.replacement.is_empty());
+        assert_eq!(edit.selection, selection);
+        let edit = indent_selected_numbers(source, selection, true).unwrap();
+        let mut result = source.to_owned();
+        result.replace_range(edit.range, &edit.replacement);
+        assert_eq!(result, "1. 앞😀뒤\n   - 하위");
+        assert_eq!(&result[edit.selection], "😀");
+        for source in ["```\n1. 예시\n```", "    1. 예시", "일반 문단", "- 불릿"] {
+            assert!(indent_selected_numbers(source, 0..source.len(), false).is_none());
+        }
+    }
+
     fn apply(source: &str, caret: usize, key: Command) -> (String, usize) {
         let edit = command(source, caret, key).unwrap_or_else(|| panic!("unhandled {key:?} at {caret} in {source:?}"));
         assert!(
