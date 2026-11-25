@@ -413,8 +413,25 @@ pub(super) fn is_diagram_link(destination: &str) -> bool {
     destination.trim_start_matches("../").strip_prefix(".diagram/").is_some_and(markdown::diagram_filename)
 }
 
+/// New attachments take a whole row; `wrap=1` opens the column beside them.
 pub(super) fn attachment_markup(alt: &str, destination: &str, width: f64) -> String {
-    format!("![{alt}](<{destination}> \"stology:width={width:.0};x=0.000;wrap=1\")\n\n")
+    format!("![{alt}](<{destination}> \"stology:width={width:.0};x=0.000;wrap=0\")\n\n")
+}
+
+/// Older notes stored a free horizontal position. It now only picks a side.
+pub(super) fn placement(link: &markdown::ImageLink) -> Placement {
+    if !link.wrap {
+        Placement::Full
+    } else if link.x < 0.5 {
+        Placement::Left
+    } else {
+        Placement::Right
+    }
+}
+
+pub(super) fn placed(link: &markdown::ImageLink, width: f64, placement: Placement) -> String {
+    let x = if placement == Placement::Right { 1.0 } else { 0.0 };
+    link.markdown_at(&link.destination, width, x, placement != Placement::Full, 0.0)
 }
 
 pub(super) unsafe fn insert_attachment(text:&NSTextView, range:NSRange, alt:&str, destination:&str, base:&Path, width:f64) {
@@ -496,49 +513,28 @@ fn draw_resize_handles(size: NSSize) {
     }
 }
 
+/// A place an attachment can be dropped: in front of block `index`.
 #[derive(Clone, Copy)]
 pub(super) struct DropAnchor {
-    byte: usize,
+    index: usize,
     top: f64,
-    block: bool,
 }
 
-// Only transfer standalone, app-style image paragraphs. Inline Markdown keeps
-// its source position and can still use a visual offset.
-unsafe fn drop_anchors(text: &NSTextView, link: &markdown::ImageLink) -> Vec<DropAnchor> {
+// Attachments move between whole blocks. An image written inside a sentence
+// stays where its Markdown puts it.
+unsafe fn drop_anchors(text: &NSTextView, link: &markdown::ImageLink) -> (usize, Vec<DropAnchor>) {
     let source = text.string().to_string();
-    if !source.is_char_boundary(link.bytes.end) { return Vec::new(); }
-    let suffix = &source[link.bytes.end..];
-    if !(suffix.starts_with("\n\n") || suffix.is_empty()) { return Vec::new(); }
-    let mut blocks = Vec::new();
-    let mut depth = 0;
-    let mut own_block = false;
-    for (event, range) in Parser::new_ext(&source, Options::all()).into_offset_iter() {
-        match event {
-            Event::Start(tag) => {
-                if depth == 0 {
-                    let at = range.start;
-                    let own = at == link.bytes.start && matches!(tag, Tag::Paragraph);
-                    own_block |= own;
-                    if at == 0 || source[..at].ends_with("\n\n") {
-                        blocks.push((at, !matches!(tag, Tag::Paragraph) && !own));
-                    }
-                }
-                depth += 1;
-            }
-            Event::End(_) => depth -= 1,
-            _ => (),
-        }
-    }
-    if !own_block { return Vec::new(); }
-    let mut units = 0;
-    let mut previous = 0;
-    blocks.into_iter().filter_map(|(byte, block)| {
-        units += source[previous..byte].encode_utf16().count();
-        previous = byte;
-        let rect = layout_fragment_rect(text, units)?;
-        Some(DropAnchor { byte, top: rect.origin.y + 6., block })
-    }).collect()
+    if !source.is_char_boundary(link.bytes.end) || !standalone(&source, &link.bytes) { return (usize::MAX, Vec::new()); }
+    let note = note_structure(&source);
+    let own = note_blocks::block_at(&note, link.bytes.start).unwrap_or(usize::MAX);
+    let Some(editor) = text.downcast_ref::<MarkdownEditor>() else { return (usize::MAX, Vec::new()) };
+    let boxes = editor.block_boxes(&source, &note);
+    let mut anchors: Vec<_> = boxes.iter().enumerate()
+        .filter_map(|(index, outline)| outline.map(|b| DropAnchor { index, top: b.rect.origin.y }))
+        .collect();
+    let end = boxes.iter().flatten().map(|b| b.rect.origin.y + b.rect.size.height).fold(0.0, f64::max);
+    anchors.push(DropAnchor { index: note.len(), top: end });
+    (own, anchors)
 }
 
 pub(super) struct ImageState {
@@ -548,7 +544,10 @@ pub(super) struct ImageState {
     pub fingerprint: u64,
     pub base: Option<PathBuf>,
     pub range: NSRange,
-    pub(super) targets: RefCell<Vec<DropAnchor>>,
+    /// The widest this image may be drawn in its column.
+    pub limit: f64,
+    /// This image's block and the boundaries it can move to, set when a drag starts.
+    pub(super) targets: RefCell<(usize, Vec<DropAnchor>)>,
     pub(super) preview: RefCell<Option<Retained<NSTextView>>>,
     pub drag: Cell<Option<(NSPoint, NSRect, Option<ResizeHandle>)>>,
 }
@@ -617,12 +616,16 @@ define_class!(
             if let Some(handle)=resize {
                 // The Markdown paragraph stays vertically anchored while its size changes.
                 frame=resized_frame(original,handle,delta.x-start.x,delta.y-start.y,max_width);
+                let limit=self.ivars().limit.max(32.0);
+                if frame.size.width>limit {
+                    let height=frame.size.height*limit/frame.size.width;
+                    if handle.left() { frame.origin.x+=frame.size.width-limit; }
+                    frame.size=NSSize::new(limit,height);
+                }
             } else {
                 if (delta.x-start.x).hypot(delta.y-start.y) < 3. { self.clear_preview(); self.set_content_frame(original); self.show_anchor(None); return; }
                 frame.origin.y=(original.origin.y+delta.y-start.y).clamp(text.textContainerOrigin().y,text.bounds().size.height.max(text.textContainerOrigin().y));
-                let anchor=self.target(original,frame);
-                self.show_anchor(anchor);
-                if let Some(target)=anchor.filter(|a|a.block) { frame.origin.y=target.top; }
+                self.show_anchor(self.target(original,frame));
                 frame.origin.x=(original.origin.x+delta.x-start.x).clamp(EDITOR_INSET,EDITOR_INSET+(max_width-frame.size.width).max(0.0));
             }
             let changed = self.content_frame() != frame;
@@ -640,12 +643,14 @@ define_class!(
             let frame=self.content_frame();
             self.clear_preview();
             self.show_anchor(None);
-            if frame!=original { self.commit_layout(original, frame, resize.is_none()); }
+            if frame!=original {
+                if !self.commit_layout(original, frame, resize.is_none()) { self.set_content_frame(original); }
+            }
             else if let Some(text)=self.ivars().text.load() {
-                // Put the caret in the paragraph beside the image, not its concealed syntax.
+                // Put the caret in the block after the image, not its concealed syntax.
                 let source=text.string().to_string();
-                let end=self.ivars().link.bytes.end;
-                let after=end+usize::from(source[end..].starts_with('\n'));
+                let note=note_structure(&source);
+                let after=note_blocks::block_at(&note,self.ivars().link.bytes.start).map_or(source.len(),|i|note[i].bytes.end);
                 text.setSelectedRange(NSRange::new(source[..after].encode_utf16().count(),0));
                 if let Some(window)=text.window(){window.makeFirstResponder(Some(&text));}
             }
@@ -668,6 +673,12 @@ define_class!(
         fn edit_diagram(&self,_sender:Option<&AnyObject>) {self.open_diagram();}
         #[unsafe(method(deleteImage:))]
         fn delete(&self,_sender:Option<&AnyObject>) {unsafe {self.replace("");}}
+        #[unsafe(method(placeImage:))]
+        fn place(&self,item:&NSMenuItem) {unsafe {
+            let placement=[Placement::Full,Placement::Left,Placement::Right][item.tag().clamp(0,2) as usize];
+            let link=&self.ivars().link;
+            self.replace(&placed(link,link.width.unwrap_or(self.content_frame().size.width),placement));
+        }}
 
     }
 );
@@ -681,10 +692,19 @@ impl InlineImage {
             let item=NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm),&NSString::from_str(title),Some(action),&NSString::new());
             item.setTarget(Some(self));menu.addItem(&item);
         };
+        let current=placement(&self.ivars().link);
+        for (tag,(title,value)) in [("한 줄 전체",Placement::Full),("왼쪽에 배치",Placement::Left),("오른쪽에 배치",Placement::Right)].into_iter().enumerate() {
+            add(title,sel!(placeImage:));
+            if let Some(item)=menu.itemAtIndex(tag as isize) {
+                item.setTag(tag as isize);
+                item.setState(if current==value {1} else {0});
+            }
+        }
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
         if self.diagram_link().is_some(){add("편집",sel!(editDiagram:));}
         add("삭제",sel!(deleteImage:));Some(menu)
     }
-    fn content_frame(&self)->NSRect{
+    pub(super) fn content_frame(&self)->NSRect{
         if self.ivars().selected.get(){NSInsetRect(self.frame(),SELECTION_MARGIN,SELECTION_MARGIN)}else{self.frame()}
     }
     fn set_content_frame(&self,frame:NSRect){
@@ -710,22 +730,14 @@ impl InlineImage {
         if let Some(open)=DIAGRAM_OPEN.with(Cell::get){open(id);return true}
         false
     }
-    unsafe fn position(&self) -> f64 {
-        let Some(text) = self.ivars().text.load() else {
-            return 0.0;
-        };
-        let span = (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0 - self.content_frame().size.width)
-            .max(1.0);
-        ((self.content_frame().origin.x - EDITOR_INSET) / span).clamp(0.0, 1.0)
-    }
     fn target(&self, original: NSRect, frame: NSRect) -> Option<DropAnchor> {
         if (frame.origin.y - original.origin.y).abs() < 3. { return None; }
-        let link = &self.ivars().link;
-        let anchors = self.ivars().targets.borrow();
+        let targets = self.ivars().targets.borrow();
+        let (own, anchors) = (targets.0, &targets.1);
         let target = anchors.iter().rev().find(|a| a.top <= frame.origin.y + 0.5)
             .or_else(|| anchors.first()).copied()?;
-        // The paragraph immediately after the image already shares its anchor.
-        (target.byte != link.bytes.start && (target.byte != link.bytes.end + 2 || target.block)).then_some(target)
+        // In front of itself or of the block after it, the image does not move.
+        (target.index != own && target.index != own + 1).then_some(target)
     }
     fn show_anchor(&self, target: Option<DropAnchor>) {
         if let Some(text) = self.ivars().text.load() {
@@ -739,9 +751,11 @@ impl InlineImage {
         if let Some(view) = self.ivars().preview.borrow_mut().take() { view.removeFromSuperview(); }
     }
     unsafe fn preview_move(&self, text: &NSTextView, original: NSRect, frame: NSRect) {
-        let mut source = text.string().to_string();
-        let Some((span, replacement, selected)) = self.layout_edit(&source, original, frame, true) else { return };
-        source.replace_range(span, &replacement);
+        let source = text.string().to_string();
+        let Some((source, selected)) = self.layout_edit(&source, original, frame, true) else {
+            self.clear_preview();
+            return;
+        };
         let mut preview = self.ivars().preview.borrow_mut();
         let view = preview.get_or_insert_with(|| {
             let (scroll, view) = make_editor(text.bounds());
@@ -763,37 +777,44 @@ impl InlineImage {
             view.setNeedsDisplay(true);
         }
     }
+    /// The note after this drag and where the image's link starts in it.
+    /// Moving picks a side from the image's centre and a block boundary from
+    /// its top; resizing only stores the new width.
     unsafe fn layout_edit(&self, source: &str, original: NSRect, frame: NSRect, moving: bool)
-        -> Option<(Range<usize>, String, usize)> {
+        -> Option<(String, usize)> {
         if fingerprint(source) != self.ivars().fingerprint { return None; }
+        let text = self.ivars().text.load()?;
         let link = &self.ivars().link;
-        let target = moving.then(|| self.target(original,frame)).flatten();
-        let y = target.map_or(link.y + frame.origin.y - original.origin.y, |a| frame.origin.y - a.top);
-        let wrap = if moving { !target.is_some_and(|a| a.block) } else { link.wrap };
-        let width = if moving { link.width.unwrap_or(frame.size.width) } else { frame.size.width };
-        let markup = link.markdown_at(&link.destination, width, self.position(), wrap, y);
-        let mut selected = link.bytes.start;
-        if let Some(anchor) = target {
-            let end = link.bytes.end + if source[link.bytes.end..].starts_with("\n\n") { 2 } else { 0 };
-            let (span, replacement) = if anchor.byte >= end {
-                let between = &source[end..anchor.byte];
-                selected += between.len();
-                (link.bytes.start..anchor.byte, format!("{between}{markup}\n\n"))
-            } else if anchor.byte < link.bytes.start {
-                selected = anchor.byte;
-                (anchor.byte..end, format!("{markup}\n\n{}", &source[anchor.byte..link.bytes.start]))
-            } else { return None };
-            Some((span, replacement, selected))
-        } else {
-            Some((link.bytes.clone(), markup, selected))
+        let current = placement(link);
+        if !moving {
+            let mut result = source.to_owned();
+            result.replace_range(link.bytes.clone(), &placed(link, frame.size.width, current));
+            return (result != source).then_some((result, link.bytes.start));
         }
+        let note = note_structure(source);
+        let own = note_blocks::block_at(&note, link.bytes.start).filter(|i| note[*i].kind == note_blocks::Kind::Image)?;
+        let body = (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0).max(80.0);
+        let right = frame.origin.x + frame.size.width / 2.0 - EDITOR_INSET > body / 2.0;
+        let side = if right { Placement::Right } else if current == Placement::Right { Placement::Left } else { current };
+        // Rewriting the link also normalizes it, so only touch it for a new side.
+        let mut result = if side == current { source.to_owned() } else { with_placement(source, &note[own], side, original.size.width)? };
+        let mut selected = link.bytes.start;
+        if let Some(target) = self.target(original, frame) {
+            // Only the link changed length, so the same block indices apply.
+            let (moved, landed) = note_blocks::reordered(&result, &note_structure(&result), &[own], Some(target.index))?;
+            selected = landed.start + moved[landed].find("![").unwrap_or(0);
+            result = moved;
+        }
+        (result != source).then_some((result, selected))
     }
-    unsafe fn commit_layout(&self, original: NSRect, frame: NSRect, moving: bool) {
-        let Some(text) = self.ivars().text.load() else { return };
+    unsafe fn commit_layout(&self, original: NSRect, frame: NSRect, moving: bool) -> bool {
+        let Some(text) = self.ivars().text.load() else { return false };
         let source = text.string().to_string();
-        let Some((span, replacement, selected)) = self.layout_edit(&source, original, frame, moving) else { return };
-        self.replace_range(&replacement, utf16_range(&source, span));
+        let Some((result, selected)) = self.layout_edit(&source, original, frame, moving) else { return false };
+        let (span, replacement) = note_blocks::edit_span(&source, &result);
+        self.replace_range(replacement, utf16_range(&source, span));
         select_image(&text, Some(selected));
+        true
     }
     unsafe fn replace(&self, replacement: &str) {
         self.replace_range(replacement, self.ivars().range);

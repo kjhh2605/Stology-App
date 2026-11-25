@@ -26,6 +26,9 @@ mod image_edit;
 mod markdown_input;
 #[path = "markdown_shortcuts.rs"]
 mod markdown_shortcuts;
+#[path = "note_blocks.rs"]
+mod note_blocks;
+use note_blocks::Placement;
 #[path = "smart_edit.rs"]
 mod smart_edit;
 #[path = "diagram_paint.rs"]
@@ -63,13 +66,7 @@ unsafe fn input_command(text: &NSTextView, command: markdown_input::Command) -> 
     }
     let source = text.string().to_string();
     let at = byte_for_utf16(&source, selection.location);
-    let Some(edit) = markdown_input::command(&source, at, command).or_else(|| {
-        if command == markdown_input::Command::Backspace {
-            backspace_below_float(text, &source, at, selection)
-        } else {
-            None
-        }
-    }) else {
+    let Some(edit) = markdown_input::command(&source, at, command) else {
         return false;
     };
     let mut result = source.clone();
@@ -246,6 +243,15 @@ struct EditorState {
     quote_bars: RefCell<Vec<NSRect>>,
     image_drop_line: std::cell::Cell<Option<f64>>,
     rule_bars: RefCell<Vec<NSRect>>,
+    sides: RefCell<Vec<SideText>>,
+    /// Blocks and outlines for the current layout, measured on first use.
+    block_cache: RefCell<Option<(u64, Vec<note_blocks::Block>, Vec<Option<BlockBox>>)>>,
+    /// Source fingerprint and byte ranges of the selected blocks.
+    selected_blocks: RefCell<(u64, Vec<Range<usize>>)>,
+    block_marks: RefCell<Vec<NSRect>>,
+    block_marquee: std::cell::Cell<Option<NSRect>>,
+    marquee: RefCell<Option<BlockMarquee>>,
+    block_drop: std::cell::Cell<Option<NSRect>>,
 }
 define_class!(
     #[unsafe(super(NSTextView, NSText, NSView, NSResponder))]
@@ -366,6 +372,8 @@ define_class!(
                 self.isSelectable() && !marked
             } else if action==Some(sel!(paste:)) && image_edit::has_clipboard_image() {
                 self.isEditable()
+            } else if (action==Some(sel!(copy:)) || action==Some(sel!(cut:))) && !self.ivars().selected_blocks.borrow().1.is_empty() {
+                true
             } else { msg_send![super(self),validateUserInterfaceItem:item] }
         }}
         #[unsafe(method(paste:))]
@@ -419,6 +427,13 @@ define_class!(
         }}
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) { unsafe {
+            if !self.ivars().selected_blocks.borrow().1.is_empty() {
+                let flags = event.modifierFlags();
+                let plain = !flags.intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Option | NSEventModifierFlags::Control);
+                if plain && matches!(event.keyCode(), 51 | 117) { self.delete_selected_blocks(); return; }
+                // Escape only lets go of the blocks; any other key goes back to writing.
+                if !flags.contains(NSEventModifierFlags::Command) && self.clear_block_selection() && event.keyCode() == 53 { return; }
+            }
             if matches!(event.keyCode(), 51 | 117)
                 && !event.modifierFlags().intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Option | NSEventModifierFlags::Control)
                 && image_edit::delete_selected_image(self) { return; }
@@ -437,7 +452,7 @@ define_class!(
             skip_heading_marker(self, true);
             skip_block_marker(self, true);
             skip_inline_marker(self, true,inline_syntax);
-            skip_code_fence(self, true);
+            skip_code_fence(self, true); skip_image_block(self, true);
         }}
         #[unsafe(method(moveRight:))]
         fn move_right(&self, sender: Option<&AnyObject>) { unsafe {
@@ -445,25 +460,60 @@ define_class!(
             skip_heading_marker(self, false);
             skip_block_marker(self, false);
             skip_inline_marker(self, false,inline_syntax);
-            skip_code_fence(self, false);
+            skip_code_fence(self, false); skip_image_block(self, false);
         }}
         #[unsafe(method(moveUp:))]
         fn move_up(&self, sender: Option<&AnyObject>) { unsafe {
             let _: () = msg_send![super(self), moveUp:sender];
-            visible_line_start(self); skip_code_fence(self, true);
+            visible_line_start(self); skip_code_fence(self, true); skip_image_block(self, true);
         }}
         #[unsafe(method(moveDown:))]
         fn move_down(&self, sender: Option<&AnyObject>) { unsafe {
             let _: () = msg_send![super(self), moveDown:sender];
-            visible_line_start(self); skip_code_fence(self, false);
+            visible_line_start(self); skip_code_fence(self, false); skip_image_block(self, false);
         }}
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) { unsafe {
             image_edit::select_image(self, None);
             self.ivars().empty_text_selection.set(None);
-            if self.place_block_caret(event) { return; }
-            let _: () = msg_send![super(self), mouseDown:event];
-            visible_line_start(self); skip_code_fence(self, false);
+            self.clear_block_selection();
+            if self.begin_block_marquee(event) { return; }
+            self.click(event);
+        }}
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) { unsafe {
+            if !self.continue_block_marquee(event) { let _: () = msg_send![super(self), mouseDragged:event]; }
+        }}
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) { unsafe {
+            match self.finish_block_marquee() {
+                // The pointer never moved: replay the press as an ordinary
+                // click, with this release for the text view's own tracking.
+                Some(Some(down)) => {
+                    if let Some(window) = self.window() { window.postEvent_atStart(event, true); }
+                    self.click(&down);
+                }
+                Some(None) => {}
+                None => { let _: () = msg_send![super(self), mouseUp:event]; }
+            }
+        }}
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) { unsafe {
+            let _: () = msg_send![super(self), mouseMoved:event];
+            self.hover_block(Some(self.convertPoint_fromView(event.locationInWindow(), None)));
+        }}
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, event: &NSEvent) { unsafe {
+            let _: () = msg_send![super(self), mouseExited:event];
+            self.hover_block(None);
+        }}
+        #[unsafe(method(copy:))]
+        fn copy_blocks(&self, sender: Option<&AnyObject>) { unsafe {
+            if !self.copy_selected_blocks() { let _: () = msg_send![super(self), copy:sender]; }
+        }}
+        #[unsafe(method(cut:))]
+        fn cut_blocks(&self, sender: Option<&AnyObject>) { unsafe {
+            if self.copy_selected_blocks() { self.delete_selected_blocks(); } else { let _: () = msg_send![super(self), cut:sender]; }
         }}
         #[unsafe(method(moveToBeginningOfLine:))]
         fn move_line_start(&self, sender: Option<&AnyObject>) { unsafe {
@@ -480,6 +530,7 @@ define_class!(
         #[unsafe(method(drawViewBackgroundInRect:))]
         fn draw_background(&self, rect: NSRect) { unsafe {
             let _: () = msg_send![super(self), drawViewBackgroundInRect:rect];
+            self.draw_block_marks();
             NSColor::colorWithSRGBRed_green_blue_alpha(0.957, 0.961, 0.980, 1.0).setFill();
             for frame in self.ivars().code_panels.borrow().iter() {
                 NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(*frame, 10.0, 10.0).fill();
@@ -511,6 +562,8 @@ define_class!(
         #[unsafe(method(didChangeText))]
         fn did_change_text(&self) { unsafe {
             self.ivars().selected_image.set(None);
+            // Writing puts the handle away until the pointer moves again.
+            if let Some(handle) = self.subviews().into_iter().find_map(|v| v.downcast::<BlockHandle>().ok()) { handle.setHidden(true); }
             let _: () = msg_send![super(self), didChangeText];
             let base = self.ivars().base_directory.borrow().clone();
             style_with_base(self, base.as_deref());
@@ -555,6 +608,14 @@ define_class!(
         }}
     }
 );
+
+impl MarkdownEditor {
+    unsafe fn click(&self, event: &NSEvent) {
+        if self.place_block_caret(event) { return; }
+        let _: () = msg_send![super(self), mouseDown:event];
+        visible_line_start(self); skip_code_fence(self, false); skip_image_block(self, false);
+    }
+}
 
 unsafe fn expand_selection(text: &NSTextView) {
     let marked: bool = msg_send![text, hasMarkedText];
@@ -1074,6 +1135,35 @@ unsafe fn skip_code_fence(text: &NSTextView, backwards: bool) {
         text.setSelectedRange(NSRange::new(source[..position].encode_utf16().count(), 0));
     }
 }
+/// Keep the caret out of a drawn image's hidden link line and separator.
+unsafe fn skip_image_block(text: &NSTextView, backwards: bool) {
+    let marked: bool = msg_send![text, hasMarkedText];
+    let selection: NSRange = msg_send![text, selectedRange];
+    if marked || selection.length != 0 {
+        return;
+    }
+    let source = text.string().to_string();
+    let caret = byte_for_utf16(&source, selection.location);
+    for child in text.subviews() {
+        let Some(image) = child.downcast_ref::<InlineImage>() else { continue };
+        let link = &image.ivars().link.bytes;
+        if !source.is_char_boundary(link.end) || !standalone(&source, link) {
+            continue;
+        }
+        let start = source[..link.start].rfind('\n').map_or(0, |n| n + 1);
+        let mut end = source[link.end..].find('\n').map_or(source.len(), |n| link.end + n + 1);
+        // The blank separator line is hidden with the link.
+        let separator = source[end..].split_inclusive('\n').next().unwrap_or("");
+        if end > link.end && separator.ends_with('\n') && separator.trim().is_empty() {
+            end += separator.len();
+        }
+        if start <= caret && caret < end {
+            let target = if backwards && start > 0 { start - 1 } else { end };
+            text.setSelectedRange(NSRange::new(source[..target].encode_utf16().count(), 0));
+            return;
+        }
+    }
+}
 unsafe fn skip_heading_marker(text: &NSTextView, backwards: bool) {
     let marked: bool = msg_send![text, hasMarkedText];
     if marked {
@@ -1153,6 +1243,13 @@ pub unsafe fn make_editor(frame: NSRect) -> (Retained<NSScrollView>, Retained<NS
     )));
     text.setDrawsBackground(true);
     text.setBackgroundColor(&NSColor::whiteColor());
+    // Pointer moves show the block handle beside the block under the pointer.
+    let area = NSTrackingArea::initWithRect_options_owner_userInfo(
+        NSTrackingArea::alloc(), NSRect::ZERO,
+        NSTrackingAreaOptions::MouseMoved | NSTrackingAreaOptions::MouseEnteredAndExited
+            | NSTrackingAreaOptions::ActiveInKeyWindow | NSTrackingAreaOptions::InVisibleRect,
+        Some(&text), None);
+    text.addTrackingArea(&area);
     scroll.setDocumentView(Some(&text));
     (scroll, text)
 }
@@ -1465,15 +1562,161 @@ unsafe fn layout_fragment_rect(text: &NSTextView, index: usize) -> Option<NSRect
     ))
 }
 
-unsafe fn add_exclusion(text: &NSTextView, paths: &mut Vec<Retained<NSBezierPath>>, rect: NSRect) {
-    paths.push(NSBezierPath::bezierPathWithRect(rect));
-    if let Some(container) = text.textContainer() {
-        container.setExclusionPaths(&objc2_foundation::NSArray::from_retained_slice(paths));
-    }
-    if let Some(manager) = text.textLayoutManager() {
-        if let Some(content) = manager.textContentManager() {
-            manager.ensureLayoutForRange(&content.documentRange());
+/// Text that shares a row with an attachment: its extra indent and, in the
+/// left column, where its lines end.
+#[derive(Clone, Debug)]
+struct SideText {
+    bytes: Range<usize>,
+    left: f64,
+    right: Option<f64>,
+    /// UTF-16 location of the attachment's anchor line and the room it needs.
+    anchor: usize,
+    reserve: f64,
+}
+
+fn standalone(source: &str, bytes: &Range<usize>) -> bool {
+    let start = source[..bytes.start].rfind('\n').map_or(0, |n| n + 1);
+    let end = source[bytes.end..].find('\n').map_or(source.len(), |n| bytes.end + n);
+    source[start..bytes.start].trim().is_empty() && source[bytes.end..end].trim().is_empty()
+}
+
+/// The note as blocks, from the structures this editor draws itself.
+fn note_structure(source: &str) -> Vec<note_blocks::Block> {
+    use note_blocks::Kind;
+    let mut structures: Vec<(Range<usize>, Kind)> =
+        code_blocks(source).into_iter().map(|code| (code.bytes, Kind::Code)).collect();
+    structures.extend(table_previews(source).into_iter().map(|table| (table.bytes, Kind::Table)));
+    structures.extend(
+        image_edit::markdown::images(source).into_iter()
+            .filter(|image| standalone(source, &image.bytes))
+            .map(|image| (image.bytes, Kind::Image)),
+    );
+    structures.extend(
+        spans(source).into_iter()
+            .filter(|span| span.treatment == Treatment::Rule)
+            .map(|span| (span.bytes, Kind::Rule)),
+    );
+    structures.sort_by_key(|(range, _)| range.start);
+    let mut end = 0;
+    structures.retain(|(range, _)| {
+        let outside = range.start >= end;
+        if outside { end = range.end; }
+        outside
+    });
+    note_blocks::blocks(source, &structures)
+}
+
+#[derive(Clone, Copy)]
+enum Attachment {
+    Image(usize),
+    Table(usize),
+}
+
+/// Give every rendered attachment its column. A placed attachment shares its
+/// row with the next block: another attachment moves beside it, and text is
+/// returned so its paragraphs can be indented into the other column.
+fn arrange_rows(
+    source: &str,
+    images: &mut [InlineImageSpec],
+    tables: &mut [InlineTableSpec],
+    body: f64,
+    handle_room: f64,
+) -> Vec<SideText> {
+    use note_blocks::Kind;
+    let note = note_structure(source);
+    let attachments: Vec<Option<Attachment>> = note.iter().map(|block| match block.kind {
+        Kind::Image => images.iter().position(|i| block.bytes.contains(&i.link.bytes.start)).map(Attachment::Image),
+        Kind::Table => tables.iter().position(|t| block.bytes.contains(&t.bytes.start)).map(Attachment::Table),
+        _ => None,
+    }).collect();
+    let rows = note_blocks::rows(&note, |index| attachments[index].map(|a| match a {
+        Attachment::Image(i) => image_edit::placement(&images[i].link),
+        Attachment::Table(t) => tables[t].placement(),
+    }));
+    let half = ((body + COLUMN_GAP) / 2.0).round();
+    let narrow = (body - COLUMN_GAP - MIN_COLUMN_WIDTH).max(80.0);
+    let mut sides = Vec::new();
+    for row in rows {
+        let Some(media) = attachments[row.media] else { continue };
+        if let Attachment::Image(i) = media {
+            let link = images[i].link.bytes.clone();
+            let line = source[link.end..].find('\n').map_or(source.len(), |n| link.end + n + 1);
+            images[i].separator = (line < note[row.media].bytes.end).then(|| line..note[row.media].bytes.end);
         }
+        let mut fit = |attachment, x: f64, limit: f64| match attachment {
+            Attachment::Image(i) => images[i].fit(x, limit),
+            Attachment::Table(t) => tables[t].fit(x, limit, handle_room),
+        };
+        let beside = row.side.and_then(|side| attachments[side]);
+        let mut text = None;
+        match (row.placement, beside, row.side) {
+            (Placement::Left, Some(side), _) => {
+                let width = fit(media, 0.0, narrow);
+                fit(side, width + COLUMN_GAP, body - width - COLUMN_GAP);
+            }
+            (Placement::Right, Some(side), _) => {
+                let width = fit(side, 0.0, narrow);
+                fit(media, width + COLUMN_GAP, body - width - COLUMN_GAP);
+            }
+            (Placement::Left, None, Some(side)) => {
+                let width = fit(media, 0.0, narrow);
+                text = Some((side, width + COLUMN_GAP, None));
+            }
+            (Placement::Right, None, side) => {
+                fit(media, half, body - half);
+                text = side.map(|side| (side, 0.0, Some(half - COLUMN_GAP - LINE_PADDING)));
+            }
+            _ => {
+                fit(media, 0.0, body);
+            }
+        }
+        let reserve = |attachment| match attachment {
+            Attachment::Image(i) => images[i].size.height + IMAGE_PADDING * 2.0,
+            Attachment::Table(t) => tables[t].reserve(handle_room),
+        };
+        // The row's last anchor line reserves the room; earlier ones collapse
+        // so both columns start at the same height.
+        let room = reserve(media).max(beside.map_or(0.0, reserve));
+        let anchor = match media {
+            Attachment::Image(i) => images[i].range.location,
+            Attachment::Table(t) => tables[t].anchor(source).location,
+        };
+        let mut reserved = |attachment, spacing: f64| match attachment {
+            Attachment::Image(i) => images[i].spacing = spacing,
+            Attachment::Table(t) => tables[t].spacing = spacing,
+        };
+        reserved(media, if row.side.is_some() { 0.0 } else { room });
+        if let Some(side) = beside {
+            reserved(side, room);
+        }
+        if let Some((side, left, right)) = text {
+            sides.push(SideText { bytes: note[side].bytes.clone(), left, right, anchor, reserve: room });
+        }
+    }
+    sides
+}
+
+/// Change the paragraph style of each source line while keeping the rest of it.
+unsafe fn adjust_paragraphs(
+    storage: &NSTextStorage,
+    source: &str,
+    bytes: Range<usize>,
+    edit: impl Fn(&NSMutableParagraphStyle),
+) {
+    let mut offset = bytes.start;
+    for line in source[bytes].split_inclusive('\n') {
+        let range = utf16_range(source, offset..offset + line.len());
+        offset += line.len();
+        if range.length == 0 || range.location >= storage.length() {
+            continue;
+        }
+        let current: Option<Retained<NSParagraphStyle>> = msg_send![storage, attribute:NSParagraphStyleAttributeName, atIndex:range.location, effectiveRange:std::ptr::null_mut::<NSRange>()];
+        let style: Retained<NSMutableParagraphStyle> = match current {
+            Some(current) => msg_send![&*current, mutableCopy],
+            None => NSMutableParagraphStyle::new(),
+        };
+        edit(&style);
+        storage.addAttribute_value_range(NSParagraphStyleAttributeName, &style, range);
     }
 }
 
@@ -1514,9 +1757,6 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
     let native = is_native.then(|| &*(text as *const NSTextView as *const MarkdownEditor));
     let remembered_base = native.and_then(|n| n.ivars().base_directory.borrow().clone());
     let base_directory = base_directory.or(remembered_base.as_deref());
-    if let Some(container) = text.textContainer() {
-        container.setExclusionPaths(&objc2_foundation::NSArray::new());
-    }
     if let Some(native) = native {
         *native.ivars().base_directory.borrow_mut() = base_directory.map(Path::to_path_buf);
         native.ivars().code_panels.borrow_mut().clear();
@@ -1524,6 +1764,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
         native.ivars().list_labels.borrow_mut().clear();
         native.ivars().quote_bars.borrow_mut().clear();
         native.ivars().rule_bars.borrow_mut().clear();
+        native.ivars().block_cache.borrow_mut().take();
     }
     let source = text.string().to_string();
     let grid_focus = text.window().and_then(|w| w.firstResponder()).and_then(|r| r.downcast::<InlineTable>().ok()).filter(|v|v.superview().is_some_and(|p|std::ptr::eq(&*p,text as &NSView))).map(|v| {
@@ -1753,24 +1994,9 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             storage.addAttribute_value_range(NSParagraphStyleAttributeName, &p, range);
         }
     }
-    let image_specs = inline_images(
-        &source,
-        base_directory,
-        (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0).max(80.0),
-    );
-    for spec in &image_specs {
-        conceal(&storage, spec.range, true);
-        let paragraph = NSMutableParagraphStyle::new();
-        paragraph.setMinimumLineHeight(0.01);
-        paragraph.setMaximumLineHeight(0.01);
-        paragraph.setParagraphSpacing(if spec.link.wrap {
-            6.0
-        } else {
-            spec.size.height + 12.0
-        });
-        storage.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, spec.range);
-    }
-    let tables = table_previews(&source)
+    let body = (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0).max(80.0);
+    let mut image_specs = inline_images(&source, base_directory, body);
+    let mut tables = table_previews(&source)
         .into_iter()
         .filter(|table| preview.as_ref().is_some_and(|p| p.start == table.bytes.start) || !intersects(&table.bytes, active.as_ref()))
         .map(|mut table| {
@@ -1781,20 +2007,41 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
         })
         .collect::<Vec<_>>();
     let handle_room = if text.isEditable() { TABLE_HANDLE_SIZE } else { 0.0 };
-    let mut terminal_separator = None;
+    let sides = arrange_rows(&source, &mut image_specs, &mut tables, body, handle_room);
+    for side in &sides {
+        adjust_paragraphs(&storage, &source, side.bytes.clone(), |style| {
+            style.setFirstLineHeadIndent(style.firstLineHeadIndent() + side.left);
+            style.setHeadIndent(style.headIndent() + side.left);
+            if let Some(right) = side.right {
+                style.setTailIndent(right + style.tailIndent().min(0.0));
+            }
+        });
+    }
+    // The blank line Markdown needs after an attachment is not a writing row.
+    // When it ends the note, TextKit still hangs the end-of-document caret
+    // line below it; `terminal` lets that offset count toward the reserved room.
+    let mut terminal = None;
+    for spec in &image_specs {
+        conceal(&storage, spec.range, true);
+        style_anchor(&storage, spec.range, spec.spacing);
+        if let Some(separator) = &spec.separator {
+            let range = utf16_range(&source, separator.clone());
+            if text.isEditable() && separator.end == source.len() && spec.spacing > 0.0 {
+                terminal = Some((spec.range, spec.spacing, range.location));
+            }
+            conceal(&storage, range, true);
+        }
+    }
     for table in &tables {
         conceal(&storage, utf16_range(&source, table.bytes.clone()), true);
-        // GFM needs a blank separator before prose. Reserve space for the
-        // table and its controls, but don't draw that separator as a text row.
         if let Some(separator) = table.separator_line(&source) {
-            if text.isEditable() && separator.end == source.len() && !table.wraps(text, handle_room) {
-                terminal_separator = Some((table, utf16_range(&source, separator.clone()).location));
+            let range = utf16_range(&source, separator.clone());
+            if text.isEditable() && separator.end == source.len() && table.spacing > 0.0 {
+                terminal = Some((table.anchor(&source), table.spacing, range.location));
             }
-            conceal(&storage, utf16_range(&source, separator), true);
+            conceal(&storage, range, true);
         }
-        if !table.wraps(text, handle_room) {
-            style_table_anchor(&storage, &source, table, handle_room, 0.0);
-        }
+        style_anchor(&storage, table.anchor(&source), table.spacing);
     }
     storage.endEditing();
     // Never inherit transparent/tiny attributes from a concealed syntax run.
@@ -1820,24 +2067,66 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
         if let Some(content) = manager.textContentManager() {
             let document = content.documentRange();
             manager.ensureLayoutForRange(&document);
-            if let Some((table, separator)) = terminal_separator {
-                // TextKit places the extra line for the end-of-document caret
-                // below a terminal separator even when that separator is
-                // collapsed. Count its offset toward the row handle's space.
+            if let Some((anchor, spacing, separator)) = terminal {
+                // The caret line hangs a full row below the hidden separator.
+                // Subtract that from the reservation so the first typed
+                // character stays where the empty caret was.
                 if let Some(fragment) = layout_fragment(text, separator) {
                     let lines = fragment.textLineFragments();
                     if lines.count() > 1 {
-                        let inset = lines.lastObject().unwrap().typographicBounds().origin.y;
-                        style_table_anchor(&storage, &source, table, handle_room, inset);
+                        // A typed line starts below its 6pt line spacing; the
+                        // empty caret line does not.
+                        let inset = lines.lastObject().unwrap().typographicBounds().origin.y - 6.0;
+                        style_anchor(&storage, anchor, spacing - inset);
                         manager.ensureLayoutForRange(&document);
                     }
                 }
+            }
+            // A side block shorter than its attachment still ends the row
+            // below it. Later rows only move down, so one pass is enough.
+            let mut grown = false;
+            for side in &sides {
+                let Some(top) = layout_fragment_rect(text, side.anchor) else { continue };
+                let end = source[..side.bytes.end].encode_utf16().count();
+                let bottom = if side.bytes.end < source.len() {
+                    layout_fragment_rect(text, end).map(|r| r.origin.y)
+                } else if source.ends_with('\n') {
+                    // The note ends here: the empty caret line follows the
+                    // spacing, 6pt above where a typed line would start.
+                    layout_fragment(text, end.saturating_sub(1)).and_then(|fragment| {
+                        let line = fragment.textLineFragments().lastObject()?.typographicBounds();
+                        Some(text.textContainerOrigin().y + fragment.layoutFragmentFrame().origin.y + line.origin.y - 6.0)
+                    })
+                } else {
+                    layout_fragment_rect(text, end.saturating_sub(1)).map(|r| r.origin.y + r.size.height)
+                };
+                let missing = bottom.map_or(0.0, |bottom| top.origin.y + side.reserve - bottom);
+                if missing > 0.5 {
+                    let content = source[side.bytes.clone()].trim_end_matches(['\r', '\n']);
+                    let last = side.bytes.start + content.rfind('\n').map_or(0, |n| n + 1);
+                    adjust_paragraphs(&storage, &source, last..side.bytes.end, |style| {
+                        style.setParagraphSpacing(style.paragraphSpacing() + missing);
+                    });
+                    grown = true;
+                }
+            }
+            if grown {
+                manager.ensureLayoutForRange(&document);
             }
         }
     }
     if let Some(undo) = &undo {
         let _: () = msg_send![undo, enableUndoRegistration];
     }
+    let shift = |byte: usize| sides.iter().find(|s| s.bytes.contains(&byte)).map_or(0.0, |s| s.left);
+    // Left edge and width of the column that holds this byte.
+    let column = |byte: usize| {
+        let full = (text.bounds().size.width - 2.0 * EDITOR_INSET).max(80.0);
+        match sides.iter().find(|s| s.bytes.contains(&byte)) {
+            Some(s) => (EDITOR_INSET + s.left, s.right.map_or(full - s.left, |right| right + LINE_PADDING)),
+            None => (EDITOR_INSET, full),
+        }
+    };
     if let Some(native) = native {
         for rule in &rules {
             if let Some(frame) = layout_fragment_rect(text, source[..rule.bytes.start].encode_utf16().count()) {
@@ -1859,7 +2148,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 native.ivars().list_labels.borrow_mut().push((
                     label.clone(),
                     NSPoint::new(
-                        EDITOR_INSET + LINE_PADDING + block.indent - width - 4.0,
+                        EDITOR_INSET + LINE_PADDING + shift(block.bytes.start) + block.indent - width - 4.0,
                         frame.origin.y + if label == "•" { 3.0 - (size - 16.0) / 2.0 } else { 5.0 },
                     ),
                     size,
@@ -1868,7 +2157,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             for depth in 0..block.quote_depth {
                 native.ivars().quote_bars.borrow_mut().push(NSRect::new(
                     NSPoint::new(
-                        EDITOR_INSET + LINE_PADDING + depth as f64 * 20.0,
+                        EDITOR_INSET + LINE_PADDING + shift(block.bytes.start) + depth as f64 * 20.0,
                         frame.origin.y + 2.0,
                     ),
                     NSSize::new(3.0, (frame.size.height - 4.0).max(20.0)),
@@ -1876,95 +2165,12 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             }
         }
     }
-    let mut image_frames: Vec<Option<NSRect>> = Vec::new();
-    let mut exclusions = Vec::new();
-    // Install floating obstacles in source order. Each exclusion can reflow
-    // the anchors of the images and tables that follow it.
-    let mut floating_tables = tables.iter().filter(|t| t.wraps(text, handle_room)).peekable();
-    for next_image in image_specs.iter().map(Some).chain(std::iter::once(None)) {
-        while let Some(&table) = floating_tables.peek() {
-            if next_image.is_some_and(|image| image.link.bytes.start < table.bytes.start) { break; }
-            floating_tables.next();
-            if let Some(anchor) = layout_fragment_rect(text, table.anchor(&source).location) {
-                let width = table.widths(text, handle_room).iter().sum::<f64>() + handle_room;
-                let frame = NSRect::new(
-                    NSPoint::new(0., anchor.origin.y - text.textContainerOrigin().y + TABLE_TOP_PADDING),
-                    NSSize::new(width + LINE_PADDING, table.height() + handle_room),
-                );
-                add_exclusion(text, &mut exclusions, frame);
-            }
-        }
-        let Some(spec) = next_image else { break };
-        let Some(local) = layout_fragment_rect(text, spec.range.location) else {
-            image_frames.push(None);
-            continue;
-        };
-        let available =
-            (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0 - spec.size.width).max(0.0);
-        let mut frame = NSRect::new(
-            NSPoint::new(EDITOR_INSET + available * spec.link.x, (local.origin.y + 6.0 + spec.link.y).max(text.textContainerOrigin().y)),
+    let image_frames: Vec<Option<NSRect>> = image_specs.iter().map(|spec| {
+        layout_fragment_rect(text, spec.range.location).map(|local| NSRect::new(
+            NSPoint::new(EDITOR_INSET + spec.x, (local.origin.y + IMAGE_PADDING).max(text.textContainerOrigin().y)),
             spec.size,
-        );
-        // A later image anchor clears an earlier image when their rectangles overlap.
-        let bottom = image_frames
-            .iter()
-            .flatten()
-            .filter(|previous| {
-                frame.origin.x < previous.origin.x + previous.size.width
-                    && previous.origin.x < frame.origin.x + frame.size.width
-                    && previous.origin.y < frame.origin.y + frame.size.height + 12.0
-                    && frame.origin.y < previous.origin.y + previous.size.height + 12.0
-            })
-            .map(|r| r.origin.y + r.size.height + 12.0)
-            .fold(frame.origin.y, f64::max);
-        if bottom > frame.origin.y {
-            let p = NSMutableParagraphStyle::new();
-            p.setMinimumLineHeight(0.01);
-            p.setMaximumLineHeight(0.01);
-            p.setParagraphSpacing(if spec.link.wrap {
-                6.0
-            } else {
-                spec.size.height + 12.0
-            });
-            p.setParagraphSpacingBefore(bottom - frame.origin.y);
-            if let Some(undo) = &undo {
-                let _: () = msg_send![undo, disableUndoRegistration];
-            }
-            storage.addAttribute_value_range(NSParagraphStyleAttributeName, &p, spec.range);
-            if let Some(undo) = &undo {
-                let _: () = msg_send![undo, enableUndoRegistration];
-            }
-            if let Some(manager) = text.textLayoutManager() {
-                if let Some(content) = manager.textContentManager() {
-                    manager.ensureLayoutForRange(&content.documentRange());
-                }
-            }
-            if let Some(local) = layout_fragment_rect(text, spec.range.location) {
-                frame.origin.y = local.origin.y + 6.0 + spec.link.y;
-            }
-            frame.origin.y = frame.origin.y.max(bottom);
-        }
-        image_frames.push(Some(frame));
-        if spec.link.wrap {
-            let origin = text.textContainerOrigin();
-            let container_width = (text.bounds().size.width - 2.0 * EDITOR_INSET).max(80.0);
-            let mut left = (frame.origin.x - origin.x - 8.0).max(0.0);
-            let mut right =
-                (frame.origin.x - origin.x + frame.size.width + 8.0).min(container_width);
-            // Avoid one-character columns when a freely positioned image leaves a tiny sliver.
-            if left < 80.0 {
-                left = 0.0;
-            }
-            if container_width - right < 80.0 {
-                right = container_width;
-            }
-            let rect = NSRect::new(
-                NSPoint::new(left, frame.origin.y - origin.y),
-                NSSize::new(right - left, frame.size.height + 8.0),
-            );
-            add_exclusion(text, &mut exclusions, rect);
-        }
-    }
+        ))
+    }).collect();
     if text.window().is_some() {
         let mtm = MainThreadMarker::new().unwrap();
         for code in &codes {
@@ -1985,12 +2191,10 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                     .and_then(|f| f.textLineFragments().firstObject())
                     .map_or(bottom.size.height, |line| line.typographicBounds().size.height)
             } else { bottom.size.height };
+            let (left, width) = column(code.bytes.start);
             let panel = NSRect::new(
-                NSPoint::new(EDITOR_INSET, top.origin.y),
-                NSSize::new(
-                    (text.bounds().size.width - 2.0 * EDITOR_INSET).max(80.0),
-                    bottom.origin.y + footer_height - top.origin.y,
-                ),
+                NSPoint::new(left, top.origin.y),
+                NSSize::new(width, bottom.origin.y + footer_height - top.origin.y),
             );
             if let Some(native) = native {
                 native.ivars().code_panels.borrow_mut().push(panel);
@@ -2002,7 +2206,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 fence: code.fence.clone(),
                 language: code.language.clone(),
             });
-            let button: Retained<CodeLanguageButton> = msg_send![super(allocated), initWithFrame:NSRect::new(NSPoint::new(EDITOR_INSET + 12.0, top.origin.y + 4.0), NSSize::new(160.0, 28.0)), pullsDown:false];
+            let button: Retained<CodeLanguageButton> = msg_send![super(allocated), initWithFrame:NSRect::new(NSPoint::new(panel.origin.x + 12.0, top.origin.y + 4.0), NSSize::new(160.0_f64.min(panel.size.width - 80.0).max(60.0), 28.0)), pullsDown:false];
             for (id, title) in CODE_LANGUAGES {
                 button.addItemWithTitle(&NSString::from_str(title));
                 if code_highlight::canonical_language(&code.language) == *id {
@@ -2046,7 +2250,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 ) {
                     native.ivars().line_numbers.borrow_mut().push((
                         (number + 1).to_string(),
-                        NSPoint::new(EDITOR_INSET + 12.0, frame.origin.y + 1.0),
+                        NSPoint::new(panel.origin.x + 12.0, frame.origin.y + 1.0),
                     ));
                 }
                 offset += line.len();
@@ -2063,7 +2267,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                         .and_then(|fragment| fragment.textLineFragments().firstObject())
                         .map_or(0.0, |line| line.typographicBounds().origin.y);
                     let allocated = HeadingPlaceholder::alloc(mtm).set_ivars(());
-                    let label: Retained<HeadingPlaceholder> = msg_send![super(allocated), initWithFrame:NSRect::new(NSPoint::new(EDITOR_INSET + LINE_PADDING, frame.origin.y + line_inset), NSSize::new(240.0, heading_size(level) + 10.0))];
+                    let label: Retained<HeadingPlaceholder> = msg_send![super(allocated), initWithFrame:NSRect::new(NSPoint::new(EDITOR_INSET + LINE_PADDING + shift(caret), frame.origin.y + line_inset), NSSize::new(240.0, heading_size(level) + 10.0))];
                     label.setStringValue(&NSString::from_str(&format!("제목 {level}")));
                     label.setFont(Some(&crate::font::bold(heading_size(level))));
                     label.setTextColor(Some(&NSColor::placeholderTextColor()));
@@ -2092,7 +2296,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 .map_or(0.0, |b| b.indent);
             let frame = NSRect::new(
                 NSPoint::new(
-                    EDITOR_INSET + LINE_PADDING + indent - 24.0,
+                    EDITOR_INSET + LINE_PADDING + shift(byte) + indent - 24.0,
                     local.origin.y + 1.0,
                 ),
                 NSSize::new(18.0, 18.0),
@@ -2111,15 +2315,16 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             checkbox.setAction(Some(sel!(toggle:)));
             text.addSubview(&checkbox);
         }
+        let mut reach: f64 = 0.0;
         for table in tables {
             let Some(local) = layout_fragment_rect(text, table.anchor(&source).location) else {
                 continue;
             };
-            let widths = table.widths(text, handle_room);
+            let widths = table.widths(handle_room);
             let grid_width = widths.iter().sum::<f64>();
             let width = grid_width + handle_room;
             let frame = NSRect::new(
-                NSPoint::new(EDITOR_INSET, local.origin.y + TABLE_TOP_PADDING),
+                NSPoint::new(EDITOR_INSET + table.x, local.origin.y + TABLE_TOP_PADDING),
                 NSSize::new(width, table.height() + handle_room),
             );
             let allocated = InlineTable::alloc(mtm).set_ivars(InlineTableState {
@@ -2196,6 +2401,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             }
             if text.isEditable() { add_grid_dividers(&view, &widths, &table); }
             text.addSubview(&view);
+            reach = reach.max(frame.origin.y + frame.size.height);
             if let Some((_,selected)) = grid_focus.as_ref().filter(|(at,_)|*at == view.ivars().range.get().location) {
                 if let (Some(a),Some(b)) = (selected.first(),selected.last()) {
                     view.select(*a,*b);
@@ -2211,6 +2417,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 selected: Default::default(),
                 text: Weak::new(text),
                 range: spec.range,
+                limit: spec.limit,
                 base: base_directory.map(Path::to_path_buf),
                 link: spec.link,
                 fingerprint: fingerprint(&source),
@@ -2230,13 +2437,18 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             image_view.setAccessibilityLabel(Some(&NSString::from_str(&image_label)));
             text.addSubview(&image_view);
             image_view.sync_selection();
-            // A floating image at the end of a short note must remain scrollable.
-            if frame.origin.y + frame.size.height + 30.0 > text.frame().size.height {
-                let mut size = text.frame().size;
-                size.height = frame.origin.y + frame.size.height + 30.0;
-                text.setFrameSize(size);
-            }
+            reach = reach.max(frame.origin.y + frame.size.height);
         }
+        // An attachment taller than the note's last line must remain scrollable.
+        if reach + 30.0 > text.frame().size.height {
+            let mut size = text.frame().size;
+            size.height = reach + 30.0;
+            text.setFrameSize(size);
+        }
+    }
+    if let Some(native) = native {
+        *native.ivars().sides.borrow_mut() = sides;
+        native.refresh_blocks();
     }
 }
 
@@ -2546,6 +2758,8 @@ define_class!(
         fn context(&self, event: &NSEvent) { unsafe { grid_menu(self,event); }}
         #[unsafe(method(gridAlign:))]
         fn align_cells(&self,item:&NSMenuItem) {unsafe { apply_grid_alignment(self,item.tag()); }}
+        #[unsafe(method(gridPlace:))]
+        fn place_table(&self,item:&NSMenuItem) {unsafe { apply_grid_placement(self,item.tag()); }}
         #[unsafe(method(commitCell:))]
         fn commit_cell(&self, _sender: Option<&AnyObject>) {
             unsafe { commit_table_cell(self); }
@@ -2556,6 +2770,8 @@ define_class!(
 include!("table_controls.rs");
 include!("table_grid.rs");
 include!("block_caret.rs");
+include!("block_edit.rs");
+include!("block_handles.rs");
 
 const TABLE_COLUMN_WIDTH: f64 = 140.0;
 
@@ -2600,11 +2816,16 @@ struct InlineTableSpec {
     bytes: Range<usize>,
     rows: Vec<Vec<String>>,
     cell_ranges: Vec<Vec<Range<usize>>>,
+    /// Left edge within the note body and the width its column allows.
+    x: f64,
+    limit: f64,
+    /// Room below the anchor line.
+    spacing: f64,
 }
 impl InlineTableSpec {
-    fn widths(&self, text: &NSTextView, handle_room: f64) -> Vec<f64> {
+    fn widths(&self, handle_room: f64) -> Vec<f64> {
         let columns = self.rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
-        let available = (text.bounds().size.width - 2.0 * EDITOR_INSET - 8.0).max(80.0) - handle_room;
+        let available = (self.limit - handle_room).max(40.0);
         let cell_width = TABLE_COLUMN_WIDTH.min(available / columns as f64);
         let mut widths: Vec<_> = (0..columns).map(|c| self.column_width(c, cell_width)).collect();
         let scale = (available / widths.iter().sum::<f64>()).min(1.);
@@ -2612,10 +2833,25 @@ impl InlineTableSpec {
         widths
     }
 
-    fn wraps(&self, text: &NSTextView, handle_room: f64) -> bool {
-        self.layout["wrap"].as_bool() == Some(true)
-            && self.widths(text, handle_room).iter().sum::<f64>() + handle_room + LINE_PADDING * 2.
-                < text.bounds().size.width - EDITOR_INSET * 2.
+    fn fit(&mut self, x: f64, limit: f64, handle_room: f64) -> f64 {
+        self.x = x;
+        self.limit = limit;
+        self.widths(handle_room).iter().sum::<f64>() + handle_room
+    }
+
+    fn placement(&self) -> Placement {
+        if self.layout["wrap"].as_bool() != Some(true) {
+            Placement::Full
+        } else if self.layout["side"].as_str() == Some("right") {
+            Placement::Right
+        } else {
+            Placement::Left
+        }
+    }
+
+    /// The space a table and its controls take below the anchor line.
+    fn reserve(&self, handle_room: f64) -> f64 {
+        self.height() + TABLE_TOP_PADDING + handle_room + if handle_room > 0.0 { 2.0 } else { 6.0 }
     }
 
     fn height(&self) -> f64 {
@@ -2640,24 +2876,17 @@ fn table_separator(source: &str, start: usize) -> Option<Range<usize>> {
 const TABLE_TOP_PADDING: f64 = 6.0;
 const TABLE_HANDLE_SIZE: f64 = 22.0;
 
-unsafe fn style_table_anchor(
-    storage: &NSTextStorage,
-    source: &str,
-    table: &InlineTableSpec,
-    handle_room: f64,
-    caret_inset: f64,
-) {
+const IMAGE_PADDING: f64 = 6.0;
+const COLUMN_GAP: f64 = 24.0;
+const MIN_COLUMN_WIDTH: f64 = 160.0;
+
+/// An attachment hangs below a collapsed anchor line that reserves its room.
+unsafe fn style_anchor(storage: &NSTextStorage, range: NSRange, spacing: f64) {
     let paragraph = NSMutableParagraphStyle::new();
     paragraph.setMinimumLineHeight(0.01);
     paragraph.setMaximumLineHeight(0.01);
-    let bottom_padding = if handle_room > 0.0 { 2.0 } else { 6.0 };
-    paragraph.setParagraphSpacing(
-        // The 26pt EOF line is taller than the 24pt handle/padding area.
-        // Subtract its full inset from the reservation so the first typed
-        // character stays at the same height as the previously empty caret.
-        (table.height() + TABLE_TOP_PADDING + handle_room + bottom_padding - caret_inset).max(0.0),
-    );
-    storage.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, table.anchor(source));
+    paragraph.setParagraphSpacing(spacing.max(0.0));
+    storage.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, range);
 }
 
 fn table_previews(source: &str) -> Vec<InlineTableSpec> {
@@ -2677,6 +2906,9 @@ fn table_previews(source: &str) -> Vec<InlineTableSpec> {
                     bytes,
                     rows: Vec::new(),
                     cell_ranges: Vec::new(),
+                    x: 0.0,
+                    limit: f64::MAX,
+                    spacing: 0.0,
                 })
             }
             Event::Start(Tag::TableHead | Tag::TableRow) => {
@@ -2752,6 +2984,23 @@ struct InlineImageSpec {
     range: NSRange,
     image: Retained<NSImage>,
     size: NSSize,
+    /// Left edge within the note body, the widest its column allows, and the
+    /// room below the anchor line.
+    x: f64,
+    limit: f64,
+    spacing: f64,
+    /// The blank line after a standalone image, hidden like a table's.
+    separator: Option<Range<usize>>,
+}
+impl InlineImageSpec {
+    fn fit(&mut self, x: f64, limit: f64) -> f64 {
+        let natural = self.image.size();
+        let width = self.link.width.unwrap_or(natural.width.min(320.0)).min(limit.max(32.0));
+        self.size = NSSize::new(width, natural.height * width / natural.width);
+        self.x = x;
+        self.limit = limit;
+        width
+    }
 }
 unsafe fn inline_images(source: &str, base: Option<&Path>, max_width: f64) -> Vec<InlineImageSpec> {
     let mut images = Vec::new();
@@ -2782,14 +3031,19 @@ unsafe fn inline_images(source: &str, base: Option<&Path>, max_width: f64) -> Ve
         if natural.width <= 0.0 || natural.height <= 0.0 {
             continue;
         }
-        let desired = link.width.unwrap_or(natural.width.min(320.0));
-        let scale = desired.min(max_width) / natural.width;
-        images.push(InlineImageSpec {
+        let mut spec = InlineImageSpec {
             link,
             range: utf16_range(source, bytes),
             image,
-            size: NSSize::new(natural.width * scale, natural.height * scale),
-        });
+            size: natural,
+            x: 0.0,
+            limit: max_width,
+            spacing: 0.0,
+            separator: None,
+        };
+        spec.fit(0.0, max_width);
+        spec.spacing = spec.size.height + IMAGE_PADDING * 2.0;
+        images.push(spec);
     }
     images
 }

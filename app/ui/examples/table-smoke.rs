@@ -172,7 +172,7 @@ unsafe fn check_after_table_caret(text: &NSTextView, window: &NSWindow) {
     let typed = caret_top("본문");
     let extra_blank = caret_top("\n본문");
     assert!((empty - typed).abs() < 1.0, "typing after the table shifted the caret vertically: empty={empty}, typed={typed}");
-    assert!((typed - extra_blank - 26.0).abs() < 1.0, "an extra blank line should remain visible: typed={typed}, extra={extra_blank}");
+    assert!((typed - extra_blank - 24.0).abs() < 1.0, "an extra blank line should remain visible: typed={typed}, extra={extra_blank}");
 }
 
 unsafe fn check_block_clicks(text: &NSTextView, window: &NSWindow) {
@@ -199,15 +199,18 @@ unsafe fn check_block_clicks(text: &NSTextView, window: &NSWindow) {
     editor::style(text);
     let frame = cells(text)[0].superview().unwrap().frame();
     let side = NSPoint::new(frame.origin.x + frame.size.width + 25., frame.origin.y + 38.);
+    // The space beside a table holds one side block, level with the table's top.
     click(side);
     insert("오른쪽");
     let caret = caret_rect();
-    assert!(caret.origin.x > frame.origin.x + frame.size.width && (side.y - caret.origin.y).abs() < 26.,
-        "side click {side:?} placed text at {caret:?}");
-    assert!(text.string().to_string().ends_with("뒤 문단") && cells(text).len() == 4);
-    click(NSPoint::new(side.x, side.y - 26.));
-    insert("윗줄");
-    assert!(text.string().to_string().contains("윗줄\n오른쪽"), "{:?}, caret {:?}, table {:?}", text.string().to_string(), caret_rect(), frame);
+    assert!(caret.origin.x > frame.origin.x + frame.size.width
+        && caret.origin.y >= frame.origin.y - 6. && caret.origin.y < frame.origin.y + 26.,
+        "side click {side:?} placed text at {caret:?} beside {frame:?}");
+    assert!(text.string().to_string().ends_with("오른쪽\n뒤 문단") && cells(text).len() == 4);
+    let below = caret_rect();
+    click(NSPoint::new(side.x, side.y + 20.));
+    insert("이어서");
+    assert!(text.string().to_string().ends_with("오른쪽이어서\n뒤 문단"), "{:?}, caret {below:?}, table {frame:?}", text.string().to_string());
     for block in [table, "```rs\nfn example() {}\n```\n", "```rs\nfn example() {}\n```"] {
         text.setString(&NSString::from_str(block));
         text.setSelectedRange(NSRange::new(text.string().length(),0));

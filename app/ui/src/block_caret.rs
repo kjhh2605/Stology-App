@@ -28,17 +28,21 @@ impl MarkdownEditor {
             .reduce(f64::max);
         for child in self.subviews() {
             let frame = child.frame();
-            if let Some(table) = child.downcast_ref::<InlineTable>() {
-                if point.y >= frame.origin.y
-                    && point.y < (frame.origin.y + frame.size.height)
-                    && point.x >= (frame.origin.x + frame.size.width)
-                    && (frame.origin.x + frame.size.width) + LINE_PADDING * 2.
-                        < self.bounds().size.width - EDITOR_INSET
-                {
-                    return self.place_beside_table(table, point);
-                }
-            } else if child.downcast_ref::<InlineImage>().is_none() {
+            let byte = if let Some(table) = child.downcast_ref::<InlineTable>() {
+                byte_for_utf16(&self.string().to_string(), table.ivars().range.get().location)
+            } else if let Some(image) = child.downcast_ref::<InlineImage>() {
+                image.ivars().link.bytes.start
+            } else {
                 continue;
+            };
+            // The page margins are not a column, and a sliver beside a wide
+            // attachment is not room for one.
+            let right = frame.origin.x + frame.size.width;
+            let edge = self.bounds().size.width - EDITOR_INSET;
+            let beside = (point.x >= right && point.x < edge && edge - right >= MIN_COLUMN_WIDTH / 2.)
+                || (point.x < frame.origin.x && point.x >= EDITOR_INSET && frame.origin.x - EDITOR_INSET >= MIN_COLUMN_WIDTH / 2.);
+            if beside && point.y >= frame.origin.y && point.y < frame.origin.y + frame.size.height {
+                return self.place_beside(byte, frame, point);
             }
             bottom = Some(bottom.unwrap_or(0.).max(frame.origin.y + frame.size.height));
         }
@@ -66,6 +70,18 @@ impl MarkdownEditor {
         } else {
             "\n"
         };
+        // An unfinished last line can sit beside an attachment. Ending it puts
+        // the caret line below the row, where the click was.
+        let (note, placed) = note_rows(&source);
+        if !source.ends_with('\n') && placed.last().is_some_and(|row| row.side == Some(note.len() - 1) && !is_attachment(&note[note.len() - 1])) {
+            let floor = bottom.max(last.origin.y + last.size.height);
+            let rows = 1 + ((point.y - floor) / NOTE_LINE_HEIGHT).floor().max(0.) as usize;
+            self.breakUndoCoalescing();
+            self.insert_block_text(&NSString::from_str(&ending.repeat(rows)), end);
+            self.breakUndoCoalescing();
+            self.setSelectedRange(NSRange::new(end.location + rows * ending.len(), 0));
+            return true;
+        }
         let mut rows = ((point.y - last.origin.y) / NOTE_LINE_HEIGHT).floor() as usize;
         // Imported blocks and the keyboard fence shortcut can end the document
         // without a terminating newline. Add the Markdown boundary before typing.
@@ -90,159 +106,72 @@ impl MarkdownEditor {
                 return false;
             }
         }
-        // The extra EOF line can still be beside a floating attachment even
-        // when the pointer is underneath it. Clear the actual exclusion path.
-        let mut clear_float = false;
-        if let Some(container) = self.textContainer() {
-            for path in container.exclusionPaths() {
-                let obstacle = path.bounds();
-                let clear_y =
-                    self.textContainerOrigin().y + obstacle.origin.y + obstacle.size.height;
-                if last.origin.y < clear_y {
-                    clear_float = true;
-                    rows = rows.max(((clear_y - last.origin.y) / NOTE_LINE_HEIGHT).ceil() as usize);
-                }
-            }
-        }
         if rows > 0 {
             self.breakUndoCoalescing();
             // A real empty paragraph gets its own horizontal position. The
             // extra EOF fragment inherits the preceding wrapped line’s inset.
-            self.insert_block_text(
-                &NSString::from_str(&ending.repeat(rows + usize::from(clear_float))),
-                end,
-            );
+            self.insert_block_text(&NSString::from_str(&ending.repeat(rows)), end);
             self.breakUndoCoalescing();
         }
         self.setSelectedRange(NSRange::new(end.location + rows * ending.len(), 0));
         true
     }
 
-    unsafe fn place_beside_table(&self, view: &InlineTable, point: NSPoint) -> bool {
+    /// A click in the empty column beside an attachment writes there. An
+    /// attachment without a side block gets a blank one; following text stays below.
+    unsafe fn place_beside(&self, byte: usize, frame: NSRect, point: NSPoint) -> bool {
         let Some(window) = self.window() else {
+            return false;
+        };
+        let source = self.string().to_string();
+        let (note, rows) = note_rows(&source);
+        let Some(index) = note_blocks::block_at(&note, byte) else {
+            return false;
+        };
+        let Some(row) = rows.iter().find(|r| r.media == index || r.side == Some(index)) else {
+            return false;
+        };
+        if let Some(side) = row.side {
+            // Two attachments fill the row. Text beside one keeps native clicks
+            // on its lines; below them the caret goes to the end of that block.
+            if rows.iter().any(|r| r.media == side) || row.side == Some(index) || is_attachment(&note[side]) {
+                return true;
+            }
+            let content = source[note[side].bytes.clone()].trim_end_matches(['\r', '\n']);
+            let end = source[..note[side].bytes.start + content.len()].encode_utf16().count();
+            let extra_line = note[side].bytes.end == source.len() && source.ends_with('\n');
+            let below = content.is_empty()
+                || paragraph_text_bottom(self, end - 1, extra_line).is_none_or(|bottom| point.y >= bottom);
+            if !below || !window.makeFirstResponder(Some(self)) {
+                return false;
+            }
+            self.setSelectedRange(NSRange::new(end, 0));
+            return true;
+        }
+        let placement = if point.x < frame.origin.x { Placement::Right } else { Placement::Left };
+        let Some(mut result) = with_placement(&source, &note[index], placement, frame.size.width) else {
             return false;
         };
         if !window.makeFirstResponder(Some(self)) {
             return false;
         }
-        let source = self.string().to_string();
-        let Some(mut table) = table_previews(&source)
-            .into_iter()
-            .find(|t| utf16_range(&source, t.bytes.clone()) == view.ivars().range.get())
-        else {
-            return false;
+        let ending = if source.contains("\r\n") { "\r\n" } else { "\n" };
+        // The first blank line after an attachment is its Markdown separator,
+        // so the side block is the line after that one.
+        let mut end = result.len() - (source.len() - note[index].bytes.end);
+        let block = &result[note[index].bytes.start..end];
+        let missing = match block.strip_suffix('\n').map(|rest| rest.strip_suffix('\r').unwrap_or(rest)) {
+            None => 2,
+            Some(rest) if rest.ends_with('\n') => 0,
+            Some(_) => 1,
         };
-        if table.wraps(self, TABLE_HANDLE_SIZE) {
-            // Clicking an empty line next to an exclusion path may select the
-            // hidden anchor or the rest of the paragraph in NSTextView.
-            let start = table
-                .separator_line(&source)
-                .map_or(table.bytes.end, |r| r.end);
-            let mut index = source[..start].encode_utf16().count();
-            for line in source[start..].split_inclusive('\n') {
-                let Some(frame) = layout_fragment_rect(self, index) else {
-                    break;
-                };
-                if point.y < frame.origin.y {
-                    break;
-                }
-                if point.y < frame.origin.y + frame.size.height {
-                    if !line.trim().is_empty() {
-                        return false;
-                    }
-                    self.setSelectedRange(NSRange::new(index, 0));
-                    return true;
-                }
-                index += line.encode_utf16().count();
-            }
-            return false;
-        }
-        let ending = if source.contains("\r\n") {
-            "\r\n"
-        } else {
-            "\n"
-        };
-        let start = table.bytes.start;
-        let end = table
-            .separator_line(&source)
-            .map_or(table.bytes.end, |r| r.end);
-        let mut block = source[start..end].to_owned();
-        let cell = table.cell_ranges[0][0].start;
-        let marker = table.marker.unwrap_or(cell..cell);
-        table.layout["wrap"] = true.into();
-        block.replace_range(
-            marker.start - start..marker.end - start,
-            &format!("<!--stology-grid {}-->", table.layout),
-        );
-        if !block.ends_with('\n') {
-            block.push_str(ending);
-        }
-        if end == table.bytes.end {
-            block.push_str(ending);
-        }
-        let frame = view.frame();
-        let row = ((point.y - frame.origin.y) / NOTE_LINE_HEIGHT).floor() as usize;
-        let caret = source[..start].encode_utf16().count()
-            + block.encode_utf16().count()
-            + row * ending.len();
-        // Keep following prose below the table on the first click. These are
-        // normal Markdown paragraphs, editable by the main text view and IME.
-        let rows = (frame.size.height / NOTE_LINE_HEIGHT).ceil() as usize;
-        block.push_str(&ending.repeat(rows));
-        self.breakUndoCoalescing();
-        self.insert_block_text(
-            &NSString::from_str(&block),
-            utf16_range(&source, start..end),
-        );
-        self.setSelectedRange(NSRange::new(caret, 0));
-        self.breakUndoCoalescing();
+        result.insert_str(end, &ending.repeat(missing + 1));
+        end += missing * ending.len();
+        commit_source(self, &result, Some(end));
         true
     }
 }
 
-// An image or wrapped table can span several empty source lines. At the
-// first visual line below it, those empty lines separate the caret from the
-// block even though there is no intervening prose.
-unsafe fn backspace_below_float(
-    text: &NSTextView,
-    source: &str,
-    at: usize,
-    selection: NSRange,
-) -> Option<markdown_input::Edit> {
-    if !source[..at].ends_with('\n') || text.textContainer()?.exclusionPaths().is_empty() {
-        return None;
-    }
-    let window = text.window()?;
-    let screen: NSRect = msg_send![text, firstRectForCharacterRange:selection actualRange:std::ptr::null_mut::<NSRange>()];
-    let caret = text.convertRect_fromView(window.convertRectFromScreen(screen), None);
-    for child in text.subviews() {
-        let frame = child.frame();
-        let distance = caret.origin.y - frame.origin.y - frame.size.height;
-        if !(-NOTE_LINE_HEIGHT * 0.5..NOTE_LINE_HEIGHT + 8.).contains(&distance) {
-            continue;
-        }
-        let range = if let Some(image) = child.downcast_ref::<InlineImage>() {
-            if !image.ivars().link.wrap || image.diagram_link().is_none() {
-                continue;
-            }
-            image.ivars().link.bytes.clone()
-        } else if let Some(table) = child.downcast_ref::<InlineTable>() {
-            let range = table.ivars().range.get();
-            byte_for_utf16(source, range.location)
-                ..byte_for_utf16(source, range.location + range.length)
-        } else {
-            continue;
-        };
-        if source
-            .get(range.end..at)
-            .is_some_and(|s| s.bytes().all(|b| matches!(b, b'\r' | b'\n')))
-        {
-            return Some(markdown_input::Edit {
-                range: range.start..at,
-                replacement: String::new(),
-                caret: range.start,
-            });
-        }
-    }
-    None
+fn is_attachment(block: &note_blocks::Block) -> bool {
+    matches!(block.kind, note_blocks::Kind::Image | note_blocks::Kind::Table)
 }

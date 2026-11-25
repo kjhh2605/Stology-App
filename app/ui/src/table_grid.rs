@@ -259,6 +259,32 @@ unsafe fn grid_menu(cell: &TableCell, event: &NSEvent) {
         item.setTag(tag as isize);
         menu.addItem(&item);
     }
+    // Where the whole table sits in its row.
+    let source = view.ivars().text.load().map(|t| t.string().to_string()).unwrap_or_default();
+    let current = table_previews(&source)
+        .into_iter()
+        .find(|t| utf16_range(&source, t.bytes.clone()) == view.ivars().range.get())
+        .map(|t| t.placement());
+    menu.addItem(&NSMenuItem::separatorItem(view.mtm()));
+    for (tag, (title, placement)) in [
+        ("표를 한 줄 전체로", Placement::Full),
+        ("표를 왼쪽에 배치", Placement::Left),
+        ("표를 오른쪽에 배치", Placement::Right),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(view.mtm()),
+            &NSString::from_str(title),
+            Some(sel!(gridPlace:)),
+            &NSString::from_str(""),
+        );
+        item.setTarget(Some(cell));
+        item.setTag(tag as isize);
+        item.setState(if current == Some(placement) { 1 } else { 0 });
+        menu.addItem(&item);
+    }
     let point = cell.convertPoint_fromView(event.locationInWindow(), None);
     menu.popUpMenuPositioningItem_atLocation_inView(None, point, Some(cell));
 }
@@ -270,6 +296,12 @@ unsafe fn apply_grid_alignment(cell: &TableCell, tag: isize) {
             layout[format!("a{r},{c}")] = tag.into();
         }
     });
+}
+
+unsafe fn apply_grid_placement(cell: &TableCell, tag: isize) {
+    let Some(view) = cell.grid() else { return };
+    let placement = [Placement::Full, Placement::Left, Placement::Right][tag.clamp(0, 2) as usize];
+    save_grid_layout(&view, |layout| set_table_placement(layout, placement));
 }
 
 unsafe fn save_grid_layout(view: &InlineTable, edit: impl FnOnce(&mut serde_json::Value)) {
