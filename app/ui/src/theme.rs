@@ -234,6 +234,7 @@ fn symbol(name: &str) -> Option<&'static str> {
         "books-plus" => "plus",
         "key" => "person.crop.circle.badge.checkmark",
         "plus" => "plus.circle",
+        "arrow-down" => "arrow.down",
         _ => return None,
     })
 }
@@ -958,18 +959,15 @@ pub unsafe fn chat_pill_button(button: &NSButton, icon_name: &str) {
     set_icon(button, Some(icon_name), 12.);
 }
 
-/// 새 답변으로 이동하는 라벤더 알약 버튼.
+/// 새 답변으로 이동하는 유리 알약 버튼. '새 대화' 버튼과 같은 반투명 흰 유리에 인디고 화살표를 단다.
 pub unsafe fn chat_new_answer_button(button: &NSButton) {
-    button.setBordered(false);
+    chat_pill_button(button, "arrow-down");
     let l = layer(button);
-    let _: () = msg_send![&l, setBackgroundColor: &*color(0.89, 0.86, 0.98, 1.).CGColor()];
     let _: () = msg_send![&l, setCornerRadius: 13.0f64];
-    let font = crate::font::regular(11.5);
-    let title = NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &button.title());
-    let range = NSRange::new(0, title.length());
-    title.addAttribute_value_range(NSForegroundColorAttributeName, &color(0.30, 0.23, 0.59, 1.), range);
-    title.addAttribute_value_range(NSFontAttributeName, &font, range);
-    button.setAttributedTitle(&title);
+    let _: () = msg_send![&l, setBackgroundColor: &*color(1., 1., 1., 0.62).CGColor()];
+    let _: () = msg_send![&l, setBorderColor: &*color(1., 1., 1., 0.9).CGColor()];
+    let _: () = msg_send![&l, setBorderWidth: 0.75f64];
+    lift(button, 0.12, 5., 2.);
 }
 
 /// Current document wash shared by saved documents and drafts.

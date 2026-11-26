@@ -668,7 +668,7 @@ impl Panel {
         let new = button("새 대화", 4);
         theme::chat_pill_button(&new, "note-plus");
         let note_chip = chat_note::NoteChip::new(&view, &target, &composer);
-        let bottom = button("↓ 새 답변", 6);
+        let bottom = button("새 답변", 6);
         theme::chat_new_answer_button(&bottom);
         bottom.setHidden(true);
         let mut panel = Self {
@@ -1072,7 +1072,7 @@ impl Panel {
         self.input_scroll.setFrame(rect(18., 86., w - 36., 42. + grow));
         self.resize_handle.setFrame(rect(36., 130. + grow, (w - 72.).max(0.), 10.));
         self.placeholder.setFrame(rect(27., 106. + grow, w - 54., 18.));
-        self.bottom.setFrame(rect(w - 126., 146. + grow + strip, 110., 26.));
+        self.bottom.setFrame(rect(w - 98., 146. + grow + strip, 82., 26.));
         self.pause_run.setFrame(rect(16., 146. + grow + strip, 168., 26.));
         self.retry_save.setFrame(rect(if self.waiting.is_some() { 190. } else { 16. }, 146. + grow + strip, 100., 26.));
     }
