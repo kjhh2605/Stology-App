@@ -472,6 +472,14 @@ define_class!(
             let _: () = msg_send![super(self), moveDown:sender];
             visible_line_start(self); skip_code_fence(self, false); skip_image_block(self, false);
         }}
+        #[unsafe(method(moveToEndOfDocument:))]
+        fn move_document_end(&self, sender: Option<&AnyObject>) { unsafe {
+            let attachment = self.ends_with_rendered_attachment();
+            let _: () = msg_send![super(self), moveToEndOfDocument:sender];
+            if attachment {
+                self.open_writing_line_after_attachment();
+            }
+        }}
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) { unsafe {
             image_edit::select_image(self, None);
@@ -1451,6 +1459,56 @@ unsafe fn conceal(storage: &NSTextStorage, range: NSRange, collapse_lines: bool)
         storage.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, range);
     }
 }
+
+// A writing line made entirely of hidden syntax still needs the font metrics
+// of its normal text. Keep one transparent glyph at full size and cancel its
+// advance so it does not move the typing position.
+unsafe fn conceal_editable_syntax(storage: &NSTextStorage, source: &str, mut hidden: Vec<Range<usize>>) {
+    hidden.sort_unstable_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for range in hidden {
+        if let Some(previous) = merged.last_mut().filter(|previous| range.start <= previous.end) {
+            previous.end = previous.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+
+    let mut anchors = Vec::new();
+    let mut ranges = merged.iter().peekable();
+    let mut start = 0;
+    for line in source.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\r', '\n']);
+        let end = start + content.len();
+        while ranges.peek().is_some_and(|range| range.end <= start) {
+            ranges.next();
+        }
+        if !content.is_empty() && ranges.peek().is_some_and(|range| range.start <= start && end <= range.end) {
+            if let Some((offset, _)) = content.char_indices().next_back() {
+                let bytes = start + offset..end;
+                let anchor = utf16_range(source, bytes.clone());
+                let font: Retained<NSFont> = msg_send![storage, attribute:NSFontAttributeName, atIndex:anchor.location, effectiveRange:std::ptr::null_mut::<NSRange>()];
+                let attrs = NSDictionary::from_slices(&[NSFontAttributeName], &[&*font as &AnyObject]);
+                let width = NSString::from_str(&source[bytes]).sizeWithAttributes(Some(&attrs)).width;
+                anchors.push((anchor, font, width));
+            }
+        }
+        start += line.len();
+    }
+
+    for range in merged {
+        conceal(storage, utf16_range(source, range), false);
+    }
+    for (range, font, width) in anchors {
+        storage.addAttribute_value_range(NSFontAttributeName, &font, range);
+        storage.addAttribute_value_range(
+            NSKernAttributeName,
+            &objc2_foundation::NSNumber::new_f64(-width),
+            range,
+        );
+    }
+}
+
 fn hidden_syntax(source: &str, active: Option<&Range<usize>>) -> Vec<Range<usize>> {
     let mut hidden = Vec::new();
     for span in spans(source) {
@@ -1945,9 +2003,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             utf16_range(&source, token.bytes),
         );
     }
-    for range in hidden_syntax(&source, active.as_ref()) {
-        conceal(&storage, utf16_range(&source, range), false);
-    }
+    let mut hidden = hidden_syntax(&source, active.as_ref());
     for (index, block) in blocks.iter().enumerate() {
         let paragraph = NSMutableParagraphStyle::new();
         paragraph.setFirstLineHeadIndent(block.indent);
@@ -1969,8 +2025,9 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             &paragraph,
             utf16_range(&source, block.bytes.clone()),
         );
-        conceal(&storage, utf16_range(&source, block.prefix.clone()), false);
+        hidden.push(block.prefix.clone());
     }
+    conceal_editable_syntax(&storage, &source, hidden);
     let codes = code_blocks(&source);
     for code in &codes {
         let paragraph = NSMutableParagraphStyle::new();
@@ -2145,11 +2202,14 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             if let Some(label) = &block.label {
                 let size = if label == "•" { (28.0_f64 - 4.0 * block.list_depth as f64).max(16.0) } else { 16.0 };
                 let width = label.chars().count() as f64 * 9.0;
+                let line_inset = layout_fragment(text, source[..block.prefix.start].encode_utf16().count())
+                    .and_then(|fragment| fragment.textLineFragments().firstObject())
+                    .map_or(0.0, |line| line.typographicBounds().origin.y);
                 native.ivars().list_labels.borrow_mut().push((
                     label.clone(),
                     NSPoint::new(
                         EDITOR_INSET + LINE_PADDING + shift(block.bytes.start) + block.indent - width - 4.0,
-                        frame.origin.y + if label == "•" { 3.0 - (size - 16.0) / 2.0 } else { 5.0 },
+                        frame.origin.y + if label == "•" { line_inset - 3.0 - (size - 16.0) / 2.0 } else { 5.0 },
                     ),
                     size,
                 ));

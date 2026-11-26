@@ -4,6 +4,42 @@
 // NOTE_LINE_HEIGHT is shared with the editor's body typography.
 
 impl MarkdownEditor {
+    unsafe fn ends_with_rendered_attachment(&self) -> bool {
+        let marked: bool = msg_send![self, hasMarkedText];
+        if marked || !self.isEditable() {
+            return false;
+        }
+        let source = self.string().to_string();
+        if source.ends_with('\n') {
+            return false;
+        }
+        self.subviews().iter().any(|view| {
+            if let Some(table) = view.downcast_ref::<InlineTable>() {
+                let range = table.ivars().range.get();
+                return range.location + range.length == self.string().length();
+            }
+            if let Some(image) = view.downcast_ref::<InlineImage>() {
+                let link = &image.ivars().link.bytes;
+                return source.get(link.end..).is_some_and(|tail| tail.trim().is_empty())
+                    && standalone(&source, link);
+            }
+            false
+        })
+    }
+
+    unsafe fn open_writing_line_after_attachment(&self) {
+        let source = self.string().to_string();
+        let separator = if source.contains("\r\n") { "\r\n\r\n" } else { "\n\n" };
+        // The first blank line separates the attachment from its next block.
+        // Match below-block clicks by opening a real, undoable writing row.
+        let end = NSRange::new(self.string().length(), 0);
+        self.breakUndoCoalescing();
+        self.insert_block_text(&NSString::from_str(separator), end);
+        self.breakUndoCoalescing();
+        let selection: NSRange = msg_send![self, selectedRange];
+        self.scrollRangeToVisible(selection);
+    }
+
     unsafe fn place_block_caret(&self, event: &NSEvent) -> bool {
         let marked: bool = msg_send![self, hasMarkedText];
         if !self.isEditable()

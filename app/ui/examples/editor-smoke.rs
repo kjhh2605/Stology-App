@@ -19,7 +19,7 @@ mod pdf_save;
 mod pdf_session;
 use objc2::{class, msg_send, rc::Retained, runtime::AnyObject, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::*;
-use objc2_foundation::{NSDictionary, NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_foundation::{NSDictionary, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString};
 unsafe fn font_at(text: &NSTextView, index: usize) -> Retained<NSFont> {
     let storage = text.textStorage().unwrap();
     msg_send![&*storage,attribute:NSFontAttributeName,atIndex:index,effectiveRange:std::ptr::null_mut::<NSRange>()]
@@ -101,6 +101,74 @@ fn main() {
         assert!(window.makeFirstResponder(Some(&text)));
         let undo: Option<Retained<AnyObject>> = msg_send![&*text, undoManager];
         let undo = undo.expect("native undo manager");
+
+        // A selected insertion point needs normal TextKit geometry even if
+        // the row has no visible characters yet.
+        let check_caret = |case: &str| -> NSRect {
+            let selection: NSRange = msg_send![&*text, selectedRange];
+            let rect: NSRect = msg_send![&*text, firstRectForCharacterRange:selection, actualRange:std::ptr::null_mut::<NSRange>()];
+            assert!(rect.size.height >= 16.0, "{case}: invisible caret {rect:?}");
+            text.convertRect_fromView(window.convertRectFromScreen(rect), None)
+        };
+        let show = |source: &str| {
+            text.setString(&NSString::from_str(source));
+            text.setSelectedRange(NSRange::new(source.encode_utf16().count(), 0));
+            editor::style_with_base(&text, Some(&directory));
+        };
+        for marker in ["#", "##", "###", "####", "#####", "######", ">", "> >"] {
+            show(marker);
+            native_insert(&text, " ");
+            assert_eq!(text.string().to_string(), format!("{marker} "));
+            check_caret(marker);
+        }
+        show("> 인용");
+        let _: () = msg_send![&*text, insertLineBreak:std::ptr::null::<AnyObject>()];
+        assert_eq!(text.string().to_string(), "> 인용\n> ");
+        check_caret("quote continuation");
+        for (source, continued) in [
+            ("- 본문", "- 본문\n- "),
+            ("1. 본문", "1. 본문\n2. "),
+            ("- [x] 본문", "- [x] 본문\n- [ ] "),
+        ] {
+            show(source);
+            let _: () = msg_send![&*text, insertNewline:std::ptr::null::<AnyObject>()];
+            assert_eq!(text.string().to_string(), continued);
+            check_caret(continued);
+        }
+        for (source, empty, restored) in [
+            ("<u>한</u>", "<u></u>", "<u>새</u>"),
+            ("[한](https://example.test)", "[](https://example.test)", "[새](https://example.test)"),
+        ] {
+            show(source);
+            text.setSelectedRange(NSRange::new(position(source, "한"), 1));
+            let _: () = msg_send![&*text, deleteBackward:std::ptr::null::<AnyObject>()];
+            assert_eq!(text.string().to_string(), empty);
+            check_caret(empty);
+            native_insert(&text, "새");
+            assert_eq!(text.string().to_string(), restored);
+        }
+        for (source, separator, overlay_class) in [
+            ("본문\n\n![](pixel.png)", "\n\n", class!(StologyInlineMarkdownImage)),
+            ("본문\r\n\r\n| H |\r\n| --- |\r\n| X |", "\r\n\r\n", class!(StologyInlineMarkdownTable)),
+        ] {
+            show(source);
+            text.setSelectedRange(NSRange::new(0, 0));
+            editor::style_with_base(&text, Some(&directory));
+            let _: () = msg_send![&*undo, removeAllActions];
+            let moved = format!("{source}{separator}");
+            for _ in 0..2 {
+                let _: () = msg_send![&*text, moveToEndOfDocument:std::ptr::null::<AnyObject>()];
+                assert_eq!(text.string().to_string(), moved);
+                let overlay = text.subviews().into_iter().find(|view| view.isKindOfClass(overlay_class)).unwrap();
+                let frame = overlay.frame();
+                assert!(check_caret(source).origin.y >= frame.origin.y + frame.size.height - 1.0);
+            }
+            let _: () = msg_send![&*undo, undo];
+            assert_eq!(text.string().to_string(), source);
+        }
+        show("");
+        let _: () = msg_send![&*undo, removeAllActions];
+        println!("PASS: caret geometry on empty Markdown writing rows and below end-of-document attachments.");
 
         // Invoke real NSTextView editing selectors. No manual style/timer tick
         // is allowed between typing and the immediate presentation assertions.
