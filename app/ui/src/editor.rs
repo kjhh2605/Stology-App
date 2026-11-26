@@ -291,6 +291,13 @@ define_class!(
                 if effective.length == 0 && !self.ivars().pasting.get() {
                     let source = self.string().to_string();
                     let caret = byte_for_utf16(&source, effective.location);
+                    if let Some(edit) = markdown_input::typed_fence(&source, caret, &value_string.to_string()) {
+                        self.breakUndoCoalescing();
+                        let _: () = msg_send![super(self), insertText:&*NSString::from_str(&edit.replacement), replacementRange:utf16_range(&source, edit.range)];
+                        self.setSelectedRange(NSRange::new(source[..caret].encode_utf16().count() + 1, 0));
+                        self.breakUndoCoalescing();
+                        return;
+                    }
                     if let Some(replacement) = smart_edit::typed_rule(&source, caret, &value_string.to_string()) {
                         self.breakUndoCoalescing();
                         let _: () = msg_send![super(self), insertText:&*NSString::from_str(replacement), replacementRange:effective];

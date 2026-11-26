@@ -239,6 +239,16 @@ fn fences(source: &str) -> Vec<Fence> {
     result
 }
 
+/// Complete a typed fence before existing following text can be parsed as code.
+pub fn typed_fence(source: &str, caret: usize, typed: &str) -> Option<Edit> {
+    if typed != "`" || caret > source.len() || !source.is_char_boundary(caret) { return None; }
+    let start = source[..caret].rfind('\n').map_or(0, |n| n + 1);
+    if &source[start..caret] != "``" || !source[caret..].starts_with('\n') { return None; }
+    if fences(&source[..start]).iter().any(|f| f.closing.is_none()) { return None; }
+    let ending = newline(source);
+    Some(Edit { range: caret..caret, replacement: format!("`{ending}{ending}```"), caret: caret + 1 })
+}
+
 fn language_id(value: &str) -> String {
     match value.to_ascii_lowercase().as_str() {
         "js" | "javascript" => "javascript".into(),
@@ -451,7 +461,10 @@ pub fn command(source: &str, caret: usize, command: Command) -> Option<Edit> {
     let ending = newline(source);
     for block in fences(source) {
         // The fence becomes a code block only once Enter commits the shortcut.
-        if command == Command::Enter && caret == block.opening_end && block.closing.is_none() {
+        if command == Command::Enter && caret == block.opening_end && (block.closing.is_none() || block.closing.as_ref().is_some_and(|c| block.body.start == block.body.end && c.start == block.body.start + ending.len())) {
+            if block.closing.is_some() {
+                return Some(Edit { range: caret..caret, replacement: String::new(), caret: block.body.start });
+            }
             let raw = &source[block.bytes.start..block.opening_end];
             let (marker, language) = opening(raw)?;
             let replacement = format!(
@@ -717,6 +730,19 @@ mod tests {
         assert!(result.is_char_boundary(edit.caret));
         (result, edit.caret)
     }
+    #[test]
+    fn typed_fence_protects_following_paragraph() {
+        let source = "앞\n``\n뒤 텍스트";
+        let at = "앞\n``".len();
+        let edit = typed_fence(source, at, "`").unwrap();
+        let mut result = source.to_string();
+        result.replace_range(edit.range, &edit.replacement);
+        assert_eq!(result, "앞\n```\n\n```\n뒤 텍스트");
+        let (result, caret) = apply(&result, edit.caret, Command::Enter);
+        assert_eq!(&result[caret..], "\n```\n뒤 텍스트");
+        assert!(typed_fence("```\n``\ncode", 6, "`").is_none());
+    }
+
     #[test]
     fn fence_shortcut_creates_empty_body_and_normalizes_alias() {
         let (text, caret) = apply("```js", 5, Command::Enter);
