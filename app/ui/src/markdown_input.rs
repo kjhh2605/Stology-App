@@ -424,6 +424,11 @@ fn list_or_quote_prefix(line: &str) -> Option<Prefix> {
 /// block. Additional blank paragraphs belong to the writer.
 fn preceding_block(source: &str, caret: usize) -> Option<Range<usize>> {
     use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
+    // A rule is deleted whole from the line below it, or from its own end
+    // when it is the last line.
+    if let Some(rule) = super::markdown_shortcuts::rules(source).into_iter().find(|rule| rule.end == caret) {
+        return Some(rule);
+    }
     for (event, range) in Parser::new_ext(source, Options::all()).into_offset_iter() {
         let Some(gap) = source.get(range.end..caret) else { continue };
         let raw = &source[range.clone()];
@@ -636,6 +641,23 @@ mod tests {
         assert_eq!(apply(table, table.len(), Command::Backspace), (String::new(), 0));
         let code = "```\n| A | B |\n| - | - |\n```\n";
         assert_eq!(apply(code, code.len(), Command::Backspace), (String::new(), 0));
+    }
+    #[test]
+    fn backspace_after_rule_deletes_the_whole_rule() {
+        for ending in ["\n", "\r\n"] {
+            for (before, after) in [("본문", "뒤"), ("본문", ""), ("본문{e}", "뒤"), ("- 항목", "{e}뒤"), ("", "뒤")] {
+                let (before, after) = (before.replace("{e}", ending), after.replace("{e}", ending));
+                let head = if before.is_empty() { String::new() } else { format!("{before}{ending}") };
+                let source = format!("{head}---{ending}{after}");
+                assert_eq!(apply(&source, head.len() + 3 + ending.len(), Command::Backspace),
+                    (format!("{head}{after}"), head.len()), "{source:?}");
+            }
+        }
+        assert_eq!(apply("앞\n\n***", 8, Command::Backspace), ("앞\n\n".into(), 5));
+        // Not rules: unfinished marks, code, and a caret further down.
+        for (source, caret) in [("본문\n--\n", 10), ("```\n---\n", 8), ("---\n\n", 5), ("본문\n===\n", 11)] {
+            assert!(command(source, caret, Command::Backspace).is_none(), "{source:?}");
+        }
     }
     #[test]
     fn backspace_at_attachment_boundaries() {

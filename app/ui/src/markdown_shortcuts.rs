@@ -13,6 +13,55 @@ pub struct BlockLine {
     pub is_list: bool,
 }
 
+/// A `---` line is a rule whatever precedes it. CommonMark reads it under a
+/// paragraph line as that paragraph's heading underline; given such a heading's
+/// range, return its last line when that line alone would be a rule.
+pub fn rule_under_text(source: &str, heading: &Range<usize>) -> Option<Range<usize>> {
+    let raw = source.get(heading.clone())?;
+    let body = raw.trim_end_matches(['\r', '\n']);
+    let start = body.rfind('\n')? + 1;
+    let marks = body[start..].trim_matches([' ', '\t']);
+    (marks.len() >= 3 && marks.bytes().all(|b| b == b'-')).then(|| heading.start + start..heading.end)
+}
+
+/// Every rule line, with its line ending.
+pub fn rules(source: &str) -> Vec<Range<usize>> {
+    Parser::new_ext(source, Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH)
+        .into_offset_iter()
+        .filter_map(|(event, range)| match event {
+            Event::Rule => Some(range),
+            Event::Start(Tag::Heading { .. }) => rule_under_text(source, &range),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A rule is one block: the caret never rests among its hidden marks. Returns
+/// where a caret on a rule line belongs, the end of the line above when moving
+/// backwards and otherwise the start of the line below.
+pub fn rule_caret(source: &str, caret: usize, backwards: bool) -> Option<usize> {
+    let rule = rules(source).into_iter().find(|rule| rule.start <= caret && caret < rule.end)?;
+    let head = &source[..rule.start];
+    let head = head.strip_suffix('\n').unwrap_or(head);
+    let above = head.strip_suffix('\r').unwrap_or(head).len();
+    let below = source[rule.clone()].ends_with('\n');
+    if rule.start > 0 && (backwards || !below) {
+        Some(above)
+    } else {
+        below.then_some(rule.end)
+    }
+}
+
+/// Undo hands a restored rule back selected, and the highlight covers the
+/// line. A selection that holds nothing but one rule becomes a caret below it.
+pub fn rule_selection_caret(source: &str, selection: Range<usize>) -> Option<usize> {
+    if selection.is_empty() {
+        return rule_caret(source, selection.start, false);
+    }
+    let rule = rules(source).into_iter().find(|rule| rule.start <= selection.start && selection.end <= rule.end)?;
+    Some(if source[rule.clone()].ends_with('\n') { rule.end } else { rule_caret(source, rule.start, false)? })
+}
+
 pub fn blocks(source: &str) -> Vec<BlockLine> {
     let excluded: Vec<_> = Parser::new_ext(source, Options::ENABLE_TABLES)
         .into_offset_iter()
@@ -211,6 +260,34 @@ mod tests {
         assert_eq!(blocks("text\n12. ")[0].label.as_deref(), Some("12."));
         assert_eq!(blocks("> > quote")[0].quote_depth, 2);
     }
+    #[test]
+    fn rules_are_whole_blocks_for_the_caret() {
+        let source = "본문\n---\n뒤";
+        let rule = source.find("---").unwrap();
+        assert_eq!(rules(source), vec![rule..rule + 4]);
+        for caret in rule..rule + 4 {
+            assert_eq!(rule_caret(source, caret, false), Some(rule + 4));
+            assert_eq!(rule_caret(source, caret, true), Some(rule - 1));
+        }
+        assert_eq!(rule_caret(source, rule + 4, true), None);
+        assert_eq!(rule_caret(source, rule - 1, false), None);
+        // CRLF: the line above ends before its \r\n.
+        assert_eq!(rule_caret("가\r\n\r\n***\r\n나", 7, true), Some(5));
+        // First line: nothing above, so the caret stays below.
+        assert_eq!(rule_caret("---\n뒤", 1, true), Some(4));
+        // Last line without an ending: nothing below.
+        assert_eq!(rule_caret("앞\n\n---", 6, false), Some(4));
+        assert_eq!(rule_caret("---", 1, false), None);
+        assert_eq!(rule_caret("```\n---\n```\n", 5, false), None);
+        assert_eq!(rule_caret("본문\n--\n", 8, false), None);
+        assert_eq!(rule_selection_caret(source, rule..rule + 4), Some(rule + 4));
+        assert_eq!(rule_selection_caret(source, rule..rule + 3), Some(rule + 4));
+        assert_eq!(rule_selection_caret(source, rule + 1..rule + 1), Some(rule + 4));
+        assert_eq!(rule_selection_caret(source, rule - 1..rule + 4), None);
+        assert_eq!(rule_selection_caret(source, rule..source.len()), None);
+        assert_eq!(rule_selection_caret(source, 0..3), None);
+    }
+
     #[test]
     fn unicode_toggle_and_multiple_lines() {
         let a = wrap("한글 😀", 0..11, "~~", "~~").unwrap();

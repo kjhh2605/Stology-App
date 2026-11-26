@@ -62,8 +62,7 @@ pub fn typed_rule(source: &str, caret: usize, input: &str) -> Option<&'static st
     if !after.is_empty() && !after.starts_with(['\r', '\n']) { return None; }
     let mut candidate = source.to_owned();
     candidate.insert(caret, '-');
-    if !Parser::new_ext(&candidate, Options::ENABLE_TABLES).into_offset_iter()
-        .any(|(event, range)| matches!(event, Event::Rule) && range.start == start && range.end >= caret + 1) {
+    if !super::markdown_shortcuts::rules(&candidate).iter().any(|rule| rule.start == start) {
         return None;
     }
     Some(if source.contains("\r\n") { "-\r\n" } else { "-\n" })
@@ -243,11 +242,11 @@ mod tests {
 
     #[test]
     fn typed_rule_moves_into_a_new_paragraph_only_for_a_thematic_break() {
-        for source in ["--", "한글 😀\n\n--"] {
+        for source in ["--", "한글 😀\n\n--", "paragraph\n--", "![a](a.png)\n--"] {
             let insert = typed_rule(source, source.len(), "-").unwrap();
             assert_eq!(format!("{source}{insert}text"), format!("{source}-\ntext"));
         }
-        for source in ["```\n--", "    --", "paragraph\n--", "`--", "word--"] {
+        for source in ["```\n--", "    --", "`--", "word--"] {
             assert!(typed_rule(source, source.len(), "-").is_none());
         }
         assert!(typed_rule("--tail", 2, "-").is_none());

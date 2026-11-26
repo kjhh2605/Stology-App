@@ -166,15 +166,6 @@ pub fn reordered(
     let mut result = String::with_capacity(source.len() + 8);
     let mut moved = 0..0;
     for (position, block) in order.iter().enumerate() {
-        let previous = position.checked_sub(1).map(|p| order[p]);
-        let joined = previous.is_some_and(|p| p + 1 != *block);
-        // `text\n---` would turn the rule into a heading underline.
-        if joined
-            && blocks[*block].kind == Kind::Rule
-            && previous.is_some_and(|p| matches!(blocks[p].kind, Kind::Text | Kind::Item))
-        {
-            result.push_str(newline);
-        }
         if position == landing.start {
             moved.start = result.len();
         }
@@ -332,7 +323,8 @@ mod tests {
         assert_eq!(apply(&table, &blocks, &[1], Some(0)).0, format!("{source}\n\n앞\n"));
         let rule = "글\n\n---\n위\n";
         let blocks = parse(rule, &[("---", Kind::Rule)]);
-        assert_eq!(apply(rule, &blocks, &[3], Some(2)).0, "글\n\n위\n\n---\n");
+        // A rule stays a rule under a text line, so no separator is added.
+        assert_eq!(apply(rule, &blocks, &[3], Some(2)).0, "글\n\n위\n---\n");
         let crlf = "가\r\n나";
         assert_eq!(apply(crlf, &parse(crlf, &[]), &[1], Some(0)).0, "나\r\n가\r\n");
     }

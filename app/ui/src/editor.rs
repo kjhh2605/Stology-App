@@ -457,7 +457,7 @@ define_class!(
             skip_heading_marker(self, true);
             skip_block_marker(self, true);
             skip_inline_marker(self, true,inline_syntax);
-            skip_code_fence(self, true); skip_image_block(self, true);
+            skip_code_fence(self, true); skip_image_block(self, true); skip_rule(self, true);
         }}
         #[unsafe(method(moveRight:))]
         fn move_right(&self, sender: Option<&AnyObject>) { unsafe {
@@ -465,17 +465,17 @@ define_class!(
             skip_heading_marker(self, false);
             skip_block_marker(self, false);
             skip_inline_marker(self, false,inline_syntax);
-            skip_code_fence(self, false); skip_image_block(self, false);
+            skip_code_fence(self, false); skip_image_block(self, false); skip_rule(self, false);
         }}
         #[unsafe(method(moveUp:))]
         fn move_up(&self, sender: Option<&AnyObject>) { unsafe {
             let _: () = msg_send![super(self), moveUp:sender];
-            visible_line_start(self); skip_code_fence(self, true); skip_image_block(self, true);
+            visible_line_start(self); skip_code_fence(self, true); skip_image_block(self, true); skip_rule(self, true);
         }}
         #[unsafe(method(moveDown:))]
         fn move_down(&self, sender: Option<&AnyObject>) { unsafe {
             let _: () = msg_send![super(self), moveDown:sender];
-            visible_line_start(self); skip_code_fence(self, false); skip_image_block(self, false);
+            visible_line_start(self); skip_code_fence(self, false); skip_image_block(self, false); skip_rule(self, false);
         }}
         #[unsafe(method(moveToEndOfDocument:))]
         fn move_document_end(&self, sender: Option<&AnyObject>) { unsafe {
@@ -581,6 +581,30 @@ define_class!(
             let base = self.ivars().base_directory.borrow().clone();
             style_with_base(self, base.as_deref());
         }}
+        // Undo and redo replace text without didChangeText, so overlays drawn
+        // from the last styling pass (rules, panels) would otherwise stay stale.
+        #[unsafe(method(stologyUndoChanged:))]
+        fn undo_changed(&self, notification: &objc2_foundation::NSNotification) { unsafe {
+            let manager: Option<Retained<AnyObject>> = msg_send![self, undoManager];
+            let same = match (notification.object(), manager) {
+                (Some(sender), Some(manager)) => Retained::as_ptr(&sender) == Retained::as_ptr(&manager),
+                _ => false,
+            };
+            let marked: bool = msg_send![self, hasMarkedText];
+            if !same || marked { return; }
+            settle_rule_selection(self);
+            // AppKit may select the restored text only after this notification.
+            let _: () = msg_send![self, performSelector:sel!(stologySettleRule:), withObject:std::ptr::null::<AnyObject>(), afterDelay:0.0f64];
+            let base = self.ivars().base_directory.borrow().clone();
+            style_with_base(self, base.as_deref());
+        }}
+        #[unsafe(method(stologySettleRule:))]
+        fn settle_rule(&self, _sender: Option<&AnyObject>) { unsafe {
+            if settle_rule_selection(self) {
+                let base = self.ivars().base_directory.borrow().clone();
+                style_with_base(self, base.as_deref());
+            }
+        }}
         #[unsafe(method(deleteForward:))]
         fn delete_forward(&self, sender: Option<&AnyObject>) { unsafe {
             if image_edit::delete_selected_image(self) { return; }
@@ -626,7 +650,7 @@ impl MarkdownEditor {
     unsafe fn click(&self, event: &NSEvent) {
         if self.place_block_caret(event) { return; }
         let _: () = msg_send![super(self), mouseDown:event];
-        visible_line_start(self); skip_code_fence(self, false); skip_image_block(self, false);
+        visible_line_start(self); skip_code_fence(self, false); skip_image_block(self, false); skip_rule(self, false);
     }
 }
 
@@ -1149,6 +1173,29 @@ unsafe fn skip_code_fence(text: &NSTextView, backwards: bool) {
     }
 }
 /// Keep the caret out of a drawn image's hidden link line and separator.
+unsafe fn settle_rule_selection(text: &NSTextView) -> bool {
+    let marked: bool = msg_send![text, hasMarkedText];
+    if marked || text.selectedRanges().count() != 1 {
+        return false;
+    }
+    let source = text.string().to_string();
+    let selection: NSRange = msg_send![text, selectedRange];
+    let bytes = byte_for_utf16(&source, selection.location)..byte_for_utf16(&source, selection.location + selection.length);
+    let Some(caret) = markdown_shortcuts::rule_selection_caret(&source, bytes) else { return false };
+    text.setSelectedRange(NSRange::new(source[..caret].encode_utf16().count(), 0));
+    true
+}
+unsafe fn skip_rule(text: &NSTextView, backwards: bool) {
+    let marked: bool = msg_send![text, hasMarkedText];
+    let selection: NSRange = msg_send![text, selectedRange];
+    if marked || selection.length != 0 {
+        return;
+    }
+    let source = text.string().to_string();
+    if let Some(target) = markdown_shortcuts::rule_caret(&source, byte_for_utf16(&source, selection.location), backwards) {
+        text.setSelectedRange(NSRange::new(source[..target].encode_utf16().count(), 0));
+    }
+}
 unsafe fn skip_image_block(text: &NSTextView, backwards: bool) {
     let marked: bool = msg_send![text, hasMarkedText];
     let selection: NSRange = msg_send![text, selectedRange];
@@ -1221,6 +1268,10 @@ pub unsafe fn make_editor(frame: NSRect) -> (Retained<NSScrollView>, Retained<NS
     let allocated = MarkdownEditor::alloc(mtm).set_ivars(EditorState::default());
     let text: Retained<MarkdownEditor> =
         msg_send![super(allocated), initUsingTextLayoutManager:true];
+    for name in ["NSUndoManagerDidUndoChangeNotification", "NSUndoManagerDidRedoChangeNotification"] {
+        objc2_foundation::NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+            &text, sel!(stologyUndoChanged:), Some(&NSString::from_str(name)), None);
+    }
     let text: Retained<NSTextView> = Retained::into_super(text);
     text.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
     text.setMinSize(NSSize::new(0.0, frame.size.height));
@@ -1300,7 +1351,10 @@ fn spans(source: &str) -> Vec<Span> {
                     // Only explicit ATX headings are styled. A following '-' or
                     // '=' line must never resize the paragraph being edited.
                     if heading_prefix(raw).is_none() {
-                        return None;
+                        // A block never depends on the one above it: `---`
+                        // under a text line is still a rule.
+                        return markdown_shortcuts::rule_under_text(source, &bytes)
+                            .map(|bytes| Span { bytes, treatment: Treatment::Rule });
                     }
                     Treatment::Heading(level as u8)
                 }
@@ -3414,6 +3468,14 @@ mod tests {
         }
         assert!(spans("## 명시적 제목").iter().any(|span| span.treatment == Treatment::Heading(2)));
         assert!(spans("본문\n\n---").iter().any(|span| span.treatment == Treatment::Rule));
+        // A rule does not depend on the block above it.
+        for (source, rule) in [("본문\n---\n뒤", "---\n"), ("본문\r\n---", "---"), ("![a](a.png)\n---\n", "---\n"), ("- 항목\n  ---\n", "  ---\n")] {
+            let found: Vec<_> = spans(source).into_iter().filter(|span| span.treatment == Treatment::Rule).collect();
+            assert_eq!(found.len(), 1, "{source:?}");
+            assert_eq!(&source[found[0].bytes.clone()], rule);
+        }
+        assert!(note_structure("본문\n---\n뒤").iter().map(|b| b.kind)
+            .eq([note_blocks::Kind::Text, note_blocks::Kind::Rule, note_blocks::Kind::Text]));
     }
 
     #[test]

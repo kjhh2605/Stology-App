@@ -437,6 +437,64 @@ fn main() {
         insert(&text, "!");
         assert!(text.string().to_string().contains("!나 문단") || text.string().to_string().contains("나 문단!"), "{:?}", text.string().to_string());
         let _ = caret(&text, &window);
+
+        // A rule does not depend on the block above it: typed right under a
+        // text line it is the same rule, and that line stays body text.
+        show(&text, base.path(), "본문\n\n---\n뒤\n");
+        let spaced = (rect_at(&text, &window, "본문"), rect_at(&text, &window, "---"), rect_at(&text, &window, "뒤"));
+        show(&text, base.path(), "본문\n--");
+        insert(&text, "-");
+        insert(&text, "뒤");
+        editor::style_with_base(&text, Some(base.path()));
+        assert_eq!(text.string().to_string(), "본문\n---\n뒤");
+        capture(&scroll, "rule-under-text");
+        let tight = (rect_at(&text, &window, "본문"), rect_at(&text, &window, "---"), rect_at(&text, &window, "뒤"));
+        assert_eq!(tight.0.size.height, spaced.0.size.height, "the line above stays body text");
+        assert_eq!(tight.2.origin.y - tight.1.origin.y, spaced.2.origin.y - spaced.1.origin.y, "same rule row");
+        assert_eq!(tight.1.origin.y - tight.0.origin.y, spaced.0.size.height.max(26.) + 2., "the rule starts right under the text line");
+
+        // The caret treats a rule as one block: arrows and clicks pass over
+        // its hidden marks, and Backspace below it removes it at once.
+        let rule_at = "본문\n".encode_utf16().count();
+        let position = |text: &NSTextView| { let range: NSRange = msg_send![text, selectedRange]; range.location };
+        let nil = std::ptr::null::<objc2::runtime::AnyObject>();
+        let _: () = msg_send![&*text, moveLeft:nil];
+        assert_eq!(position(&text), rule_at + 4, "left from 뒤 stops at the start of its line");
+        let _: () = msg_send![&*text, moveLeft:nil];
+        assert_eq!(position(&text), rule_at - 1, "left again lands at the end of 본문");
+        let _: () = msg_send![&*text, moveRight:nil];
+        assert_eq!(position(&text), rule_at + 4, "right crosses the rule in one step");
+        let _: () = msg_send![&*text, moveUp:nil];
+        assert!(position(&text) < rule_at, "up crosses the rule");
+        let _: () = msg_send![&*text, moveDown:nil];
+        assert!(position(&text) >= rule_at + 4, "down crosses the rule");
+        click(&text, &window, NSPoint::new(300., tight.1.origin.y + tight.1.size.height / 2.));
+        assert_eq!(position(&text), rule_at + 4, "a click on the rule puts the caret below it");
+        // Reopen so the undo step holds only the Backspace.
+        show(&text, base.path(), "본문\n---\n뒤");
+        text.setSelectedRange(NSRange::new(rule_at + 4, 0));
+        key(&text, &window, 51, "\u{7f}");
+        assert_eq!(text.string().to_string(), "본문\n뒤", "one Backspace removes the rule");
+        assert_eq!(position(&text), rule_at);
+        undo(&text, base.path());
+        assert_eq!(text.string().to_string(), "본문\n---\n뒤", "one undo restores it");
+        // However undo leaves the selection, a rule never stays highlighted.
+        text.setSelectedRange(NSRange::new(rule_at, 4));
+        let _: () = msg_send![&*text, stologySettleRule:nil];
+        let after: NSRange = msg_send![&*text, selectedRange];
+        assert_eq!((after.location, after.length), (rule_at + 4, 0), "the restored rule is not left selected");
+        // Undo restyles by itself, without waiting for the app's next pass:
+        // a restored table gets its overlay back straight away.
+        let table = "앞\n\n| 가 | 나 |\n| --- | --- |\n| 1 | 2 |\n\n뒤";
+        show(&text, base.path(), table);
+        text.setSelectedRange(NSRange::new(table.encode_utf16().count() - 1, 0));
+        key(&text, &window, 51, "\u{7f}");
+        assert!(tables(&text).is_empty() && !text.string().to_string().contains("가"), "Backspace removed the table");
+        text.undoManager().unwrap().undo();
+        assert_eq!(text.string().to_string(), table);
+        assert_eq!(tables(&text).len(), 1, "undo redraws what it restores");
+        text.undoManager().unwrap().redo();
+        assert!(tables(&text).is_empty(), "redo redraws too");
         println!("PASS: attachment rows (left/right/whole row, pairs, right tables, code beside an image), image drag and menu placement, table placement from the cell menu, side blocks by click and drop, block handle moves, margin selection with delete/copy/undo, hidden image lines skipped");
     }
 }
