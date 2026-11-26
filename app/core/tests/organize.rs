@@ -295,7 +295,7 @@ fn one_material_analysis_reads_only_that_material() {
 }
 
 #[test]
-fn stopping_waiting_and_edits_during_a_run_never_publish_a_partial_map() {
+fn stopping_and_waiting_never_publish_a_partial_map_and_edits_do_not_block_publishing() {
     let (dir, w) = fixture();
     let root = dir.path();
     let n = note(root, &w, "느린 자료", "SLOW 물은 액체의 한 종류이다.");
@@ -320,17 +320,37 @@ fn stopping_waiting_and_edits_during_a_run_never_publish_a_partial_map() {
     assert_eq!(graph(root, &w)["concepts"], json!([]));
     call(root, json!({"op":"organize.resume","workspace_id":w}));
 
-    // The material is edited while the run reads it: nothing is published.
+    // The material is edited while the run reads it: the copy fixed at the
+    // request is published, and the material waits to be read again.
     while calls(root).len() < 2 {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(50));
     }
-    call(root, json!({"op":"note.update","id":n["id"],"expected_version":n["version"],"body":"SLOW 물은 액체의 한 종류이다. 고침."}));
+    call(root, json!({"op":"note.update","id":n["id"],"expected_version":n["version"],"body":"SLOW 불은 현상의 한 종류이다."}));
+    let run = finish(root, &w);
+    assert_eq!(run["state"], "succeeded", "{run}");
+    let g = graph(root, &w);
+    let names: Vec<&str> = g["concepts"].as_array().unwrap().iter().filter_map(|c| c["name"].as_str()).collect();
+    assert!(names.contains(&"물") && !names.contains(&"불"), "{names:?}");
+    assert_eq!(call(root, json!({"op":"ontology.status","workspace_id":w}))["materials"][0]["state"], "changed");
+}
+
+#[test]
+fn a_material_deleted_during_a_run_is_not_published() {
+    let (dir, w) = fixture();
+    let root = dir.path();
+    let n = note(root, &w, "느린 자료", "SLOW 물은 액체의 한 종류이다.");
+    call(root, json!({"op":"organize.start","workspace_id":w}));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while calls(root).is_empty() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    call(root, json!({"op":"note.delete","id":n["id"]}));
     let run = finish(root, &w);
     assert_eq!(run["state"], "failed", "{run}");
-    assert!(run["error"].as_str().unwrap().contains("편집"), "{run}");
+    assert!(run["error"].as_str().unwrap().contains("삭제"), "{run}");
     assert_eq!(graph(root, &w)["concepts"], json!([]));
-    assert_eq!(call(root, json!({"op":"ontology.status","workspace_id":w}))["materials"][0]["state"], "new");
 }
 
 #[test]

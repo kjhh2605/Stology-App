@@ -521,9 +521,11 @@ const RUN_TABLES: [&str; 14] = [
     "ont_concepts", "ont_members", "ont_units", "ont_links", "ont_material_state", "ont_revisions",
 ];
 /// Replace the subject's map with the scratch copy in one transaction, while the
-/// listed sources are still the versions that were read and nothing else changed
-/// the subject since the scratch copy was taken.
-pub(crate) fn publish(root: &Path, scratch: &Path, w: &str, sources: &[(String, String)], generation: i64) -> Result<()> {
+/// listed sources still exist and nothing else changed the map since the
+/// scratch copy was taken. Edits made to a source while it was read do not
+/// block publishing: the map holds what the fixed copy said, and the source
+/// shows as changed until it is read again.
+pub(crate) fn publish(root: &Path, scratch: &Path, w: &str, sources: &[String], generation: i64) -> Result<()> {
     let mut c = knowledge::db(root)?;
     c.execute("ATTACH DATABASE ?1 AS run", [scratch.to_string_lossy()])?;
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -537,7 +539,7 @@ pub(crate) fn publish(root: &Path, scratch: &Path, w: &str, sources: &[(String, 
     }
     remove_deleted_links(&tx,w)?;
     knowledge::bump_generation(&tx, w)?;
-    crate::storage::with_current_sources(root, w, sources, || {
+    crate::storage::with_live_sources(root, w, sources, || {
         tx.commit()?;
         Ok(())
     })?;

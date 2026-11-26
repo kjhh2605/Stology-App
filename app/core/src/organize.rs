@@ -398,6 +398,7 @@ fn how(root: &Path, run: &Value) -> Vec<String> {
         }
         match m["state"].as_str() {
             Some("failed") => lines.push(format!("건너뜀: {title} — {}", m["reason"].as_str().unwrap_or("읽지 못했어요"))),
+            // Older run records may still hold a source skipped because it was edited.
             Some("changed") => lines.push(format!("건너뜀: {title} — 정리하는 동안 자료가 바뀌었어요. 다음 정리에서 다시 읽어요")),
             _ => {}
         }
@@ -684,6 +685,9 @@ fn read_chunk(ctx: &Ctx, run: &mut Value, skill: &Skill, mi: usize, ki: usize, e
                     let last = run["materials"][mi]["chunks"][ki]["attempts"].as_array_mut().and_then(|a| a.last_mut()).context("묶음 기록 없음")?;
                     last["claims"] = json!(total);
                     last["dropped"] = json!(checked.dropped);
+                    if checked.repaired > 0 {
+                        last["repaired"] = json!(checked.repaired);
+                    }
                     if best.as_ref().is_none_or(|b| (b.total == 0 && total > 0) || (total > 0 && rate < drop_rate(b))) {
                         best = Some(checked);
                     }
@@ -979,13 +983,8 @@ fn pipeline(ctx: &Ctx, run: &mut Value) -> Result<Value> {
     let mut read = Vec::new();
     for mi in 0..of {
         anyhow::ensure!(!stopped(ctx.job), STOPPED);
+        // The copy fixed at the request is read even when the source was edited since.
         let (id, hash) = (run["materials"][mi]["id"].as_str().unwrap_or("").to_owned(), run["materials"][mi]["hash"].as_str().unwrap_or("").to_owned());
-        let current = crate::storage::handle(root, &json!({"op":"source.get","id":id})).ok();
-        if current.as_ref().and_then(|c| c["hash"].as_str()) != Some(hash.as_str()) {
-            run["materials"][mi]["state"] = json!("changed");
-            save(root, run)?;
-            continue;
-        }
         run["materials"][mi]["state"] = json!("reading");
         match read_material(ctx, run, &extract, mi, of) {
             Ok(result) => {
@@ -1006,7 +1005,7 @@ fn pipeline(ctx: &Ctx, run: &mut Value) -> Result<Value> {
                 m["claims"] = json!(result.total);
                 m["dropped"] = json!(result.dropped);
                 m["kept"] = json!(result.analysis.assertions.len());
-                read.push((id, hash));
+                read.push(id);
             }
             Err(e) => {
                 let message = format!("{e:#}");
@@ -1019,8 +1018,8 @@ fn pipeline(ctx: &Ctx, run: &mut Value) -> Result<Value> {
         }
         save(root, run)?;
     }
-    let failed: Vec<Value> = run["materials"].as_array().into_iter().flatten().filter(|m| matches!(m["state"].as_str(), Some("failed" | "changed")))
-        .map(|m| json!({"title":m["title"],"reason":if m["state"] == "changed" { json!("정리하는 동안 자료가 바뀌었어요") } else { m["reason"].clone() }})).collect();
+    let failed: Vec<Value> = run["materials"].as_array().into_iter().flatten().filter(|m| m["state"] == "failed")
+        .map(|m| json!({"title":m["title"],"reason":m["reason"]})).collect();
     let low: Vec<Value> = run["materials"].as_array().into_iter().flatten().filter(|m| m["quality"] == "low").map(|m| m["title"].clone()).collect();
     if single {
         let reason = failed.first().and_then(|f| f["reason"].as_str()).unwrap_or("자료를 읽지 못했습니다").to_owned();

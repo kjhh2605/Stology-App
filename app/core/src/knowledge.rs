@@ -579,6 +579,26 @@ pub(crate) struct Checked {
     /// Claims the provider returned, and how many failed the checks.
     pub(crate) total: usize,
     pub(crate) dropped: usize,
+    /// Kept claims that named a concept or relation instead of using its id.
+    pub(crate) repaired: usize,
+}
+/// What a claim may write in place of an id: names and aliases for concepts,
+/// labels, aliases and the type for relations. Only a name that points to one
+/// id is used; anything ambiguous stays unresolved and the claim is dropped.
+struct Names(HashMap<String, Vec<String>>);
+impl Names {
+    fn new() -> Self {
+        Names(HashMap::new())
+    }
+    fn add(&mut self, name: &str, id: &str) {
+        let ids = self.0.entry(normalized(name)).or_default();
+        if !ids.iter().any(|known| known == id) {
+            ids.push(id.to_owned());
+        }
+    }
+    fn one(&self, name: &str) -> Option<&str> {
+        self.0.get(&normalized(name)).filter(|ids| ids.len() == 1).map(|ids| ids[0].as_str())
+    }
 }
 /// Keep only claims whose concepts, relation and evidence really exist in the
 /// source. A wrong claim is dropped on its own; the caller judges the ratio.
@@ -603,12 +623,41 @@ pub(crate) fn check(a: Analysis, e: &Extraction) -> Result<Checked> {
             relations.insert(r.id.clone(), r);
         }
     }
+    let mut concept_names = Names::new();
+    for c in concepts.values() {
+        for name in std::iter::once(&c.name).chain(&c.aliases) {
+            concept_names.add(name, &c.id);
+        }
+    }
+    let (mut relation_labels, mut relation_kinds) = (Names::new(), Names::new());
+    for r in relations.values() {
+        for label in std::iter::once(&r.label).chain(&r.aliases) {
+            relation_labels.add(label, &r.id);
+        }
+        relation_kinds.add(r.kind.as_deref().unwrap_or(""), &r.id);
+    }
+    let concept_id = |given: &str| -> Option<String> {
+        if concepts.contains_key(given) { Some(given.to_owned()) } else { concept_names.one(given).map(str::to_owned) }
+    };
+    let relation_id = |given: &str| -> Option<String> {
+        if relations.contains_key(given) {
+            Some(given.to_owned())
+        } else {
+            relation_labels.one(given).or_else(|| relation_kinds.one(given)).map(str::to_owned)
+        }
+    };
     let squashed_units: HashMap<&Locator, String> = e.units.iter().map(|u| (&u.locator, squashed(&u.text))).collect();
     let mut assertions = Vec::new();
+    let mut repaired = 0;
     for mut claim in a.assertions {
-        if !concepts.contains_key(&claim.subject) || !concepts.contains_key(&claim.object) || !relations.contains_key(&claim.relation) || claim.condition.len() > 8000 {
+        let (Some(subject), Some(relation), Some(object)) = (concept_id(&claim.subject), relation_id(&claim.relation), concept_id(&claim.object)) else {
+            continue;
+        };
+        if claim.condition.len() > 8000 {
             continue;
         }
+        let renamed = subject != claim.subject || relation != claim.relation || object != claim.object;
+        (claim.subject, claim.relation, claim.object) = (subject, relation, object);
         let mut evidence = Vec::new();
         for mut ev in claim.evidence.into_iter().take(100) {
             let Some(unit) = e.units.iter().find(|u| u.locator == ev.locator) else { continue };
@@ -631,6 +680,7 @@ pub(crate) fn check(a: Analysis, e: &Extraction) -> Result<Checked> {
         }
         if !evidence.is_empty() {
             claim.evidence = evidence;
+            repaired += usize::from(renamed);
             assertions.push(claim);
         }
     }
@@ -641,7 +691,7 @@ pub(crate) fn check(a: Analysis, e: &Extraction) -> Result<Checked> {
     kept_concepts.sort_by(|a, b| a.id.cmp(&b.id));
     kept_relations.sort_by(|a, b| a.id.cmp(&b.id));
     let dropped = total - assertions.len();
-    Ok(Checked { analysis: Analysis { concepts: kept_concepts, relations: kept_relations, assertions }, total, dropped })
+    Ok(Checked { analysis: Analysis { concepts: kept_concepts, relations: kept_relations, assertions }, total, dropped, repaired })
 }
 fn candidate_concept(
     c: &Connection,
@@ -1421,4 +1471,36 @@ print(json.dumps({'input_hash':'', 'kind':'pdf', 'warnings':[], 'units':[{'locat
         assert!(old_image.is_file() && new_image.is_file());
     }
 
+
+    #[test]
+    fn claims_naming_a_concept_or_relation_are_repaired_only_when_one_matches() {
+        let e = Extraction {
+            input_hash: "h".into(), kind: "md".into(), warnings: vec![],
+            units: vec![Unit { locator: Locator { kind: "paragraph".into(), index: 1 }, text: "LLM과 에이전트는 대비된다. API 키는 .env에만 둔다.".into(), images: vec![] }],
+        };
+        let concept = |id: &str, name: &str, aliases: &[&str]| Concept { id: id.into(), name: name.into(), aliases: aliases.iter().map(|a| a.to_string()).collect(), definition: format!("{name}의 뜻"), kind: None };
+        let relation = |id: &str, label: &str, kind: &str| Relation { id: id.into(), label: label.into(), definition: "뜻".into(), directed: true, aliases: vec![], kind: Some(kind.into()) };
+        let claim = |s: &str, r: &str, o: &str, quote: &str| Assertion {
+            subject: s.into(), relation: r.into(), object: o.into(), condition: String::new(), negated: false,
+            evidence: vec![Evidence { locator: Locator { kind: "paragraph".into(), index: 1 }, quote: quote.into(), image_path: None, region: None }],
+        };
+        let a = Analysis {
+            concepts: vec![concept("c1", "LLM", &[]), concept("c2", "에이전트", &["Agent"]), concept("c3", "API 키", &[]), concept("c4", ".env", &[]), concept("c5", "모델", &[]), concept("c6", "모델", &[])],
+            relations: vec![relation("r1", "대비된다", "contrast"), relation("r2", "에만 둔다", "applies"), relation("r3", "쓰인다", "applies")],
+            assertions: vec![
+                claim("c1", "r1", "c2", "LLM과 에이전트는 대비된다."),
+                // The relation's type instead of its id.
+                claim("c1", "contrast", "agent", "LLM과 에이전트는 대비된다."),
+                // Names for every part, the way a provider sometimes answers.
+                claim("API 키", "에만  둔다", ".env", "API 키는 .env에만 둔다."),
+                // Two relations share the type, two concepts share the name: dropped.
+                claim("c3", "applies", "c4", "API 키는 .env에만 둔다."),
+                claim("모델", "r1", "c2", "LLM과 에이전트는 대비된다."),
+            ],
+        };
+        let checked = check(a, &e).unwrap();
+        assert_eq!((checked.total, checked.dropped, checked.repaired), (5, 2, 2));
+        let kept: Vec<(&str, &str, &str)> = checked.analysis.assertions.iter().map(|c| (c.subject.as_str(), c.relation.as_str(), c.object.as_str())).collect();
+        assert_eq!(kept, [("c1", "r1", "c2"), ("c1", "r1", "c2"), ("c3", "r2", "c4")]);
+    }
 }

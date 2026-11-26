@@ -708,6 +708,24 @@ pub(crate) fn with_current_sources<T>(
     Ok(result)
 }
 
+/// Hold the document writer lock through graph publication while every listed
+/// source still exists in the subject. A run publishes what it read from the
+/// version fixed at the request; later edits only mark the source as changed.
+pub(crate) fn with_live_sources<T>(
+    root: &Path, workspace_id: &str, ids: &[String],
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let mut c = connect(root)?;
+    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for id in ids {
+        let live = document(&tx, id).is_ok_and(|d| d.workspace_id == workspace_id);
+        anyhow::ensure!(live, "정리하는 동안 자료가 삭제되어 이번 결과를 반영하지 않았어요. 이전 지도는 그대로예요. 다시 정리해 주세요.");
+    }
+    let result = action()?;
+    tx.commit()?;
+    Ok(result)
+}
+
 pub fn handle(root: &Path, request: &Value) -> Result<Value> {
     let mut c = connect(root)?;
     // Recover and mutate under the same SQLite writer lock. No request may

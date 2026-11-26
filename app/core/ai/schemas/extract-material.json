@@ -41,9 +41,9 @@
         "additionalProperties": false,
         "required": ["subject", "relation", "object", "condition", "negated", "evidence"],
         "properties": {
-          "subject": {"type": "string"},
-          "relation": {"type": "string"},
-          "object": {"type": "string"},
+          "subject": {"type": "string", "description": "concepts[].id 중 하나"},
+          "relation": {"type": "string", "description": "relations[].id 중 하나 (label·type 아님)"},
+          "object": {"type": "string", "description": "concepts[].id 중 하나"},
           "condition": {"type": "string"},
           "negated": {"type": "boolean"},
           "evidence": {
