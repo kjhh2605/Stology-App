@@ -5,6 +5,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+.worktreeinclude
 
 /decisions/
 /docs/
@@ -19,8 +20,6 @@ AGENTS.md
 /app/CLAUDE.md
 /app/bench/
 /app/tests/providers/
-/app/docs/ui-glossary.md
-/app/docs/images/ui-glossary/
 /app/docs/sidebar-interactions.md
 /app/docs/markdown-parity.md
 /app/docs/graph-parity.md

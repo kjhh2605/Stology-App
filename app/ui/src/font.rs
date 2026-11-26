@@ -16,7 +16,9 @@ unsafe extern "C" {
 
 pub fn register_bundled_fonts() {
     let Some(resources) = std::env::current_exe().ok().and_then(|exe| {
-        exe.parent()?.parent().map(|contents| contents.join("Resources/fonts"))
+        exe.parent()?
+            .parent()
+            .map(|contents| contents.join("Resources/fonts"))
     }) else {
         return;
     };
