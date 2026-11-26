@@ -38,13 +38,13 @@ define_class!(
         #[unsafe(method(outlineView:isItemExpandable:))]
         unsafe fn expandable(&self,_outline:&NSOutlineView,item:&AnyObject)->bool{!self.children(Some(item)).is_empty()}
         #[unsafe(method_id(outlineView:objectValueForTableColumn:byItem:))]
-        unsafe fn display(&self,_outline:&NSOutlineView,_column:Option<&NSTableColumn>,item:Option<&AnyObject>)->Option<Retained<AnyObject>>{let p=item.map(|i|path(i)).unwrap_or_default();let label=if p.is_empty(){"과목 루트"}else{p.rsplit('/').next().unwrap_or(&p)};Some(Retained::cast_unchecked(NSString::from_str(label)))}
+        unsafe fn display(&self,_outline:&NSOutlineView,_column:Option<&NSTableColumn>,item:Option<&AnyObject>)->Option<Retained<AnyObject>>{let p=item.map(|i|path(i)).unwrap_or_default();let label=p.rsplit('/').next().unwrap_or(&p);Some(Retained::cast_unchecked(NSString::from_str(label)))}
     }
     unsafe impl NSOutlineViewDelegate for FolderTree {
         #[unsafe(method_id(outlineView:viewForTableColumn:item:))]
         unsafe fn cell_view(&self, outline: &NSOutlineView, column: Option<&NSTableColumn>, item: &AnyObject) -> Option<Retained<NSView>> {
             let p = path(item);
-            let title = if p.is_empty() { "과목 루트" } else { p.rsplit('/').next().unwrap_or(&p) };
+            let title = p.rsplit('/').next().unwrap_or(&p);
             let width = column.map(|column| column.width()).unwrap_or(420.);
             let cell = NSTableCellView::initWithFrame(NSTableCellView::alloc(mtm()), rect(0., 0., width, 28.));
             let label = NSTextField::labelWithString(&NSString::from_str(title), mtm());
@@ -70,8 +70,8 @@ define_class!(
     impl FolderTree{
         #[unsafe(method(addFolder:))]
         fn add_folder(&self,_sender:Option<&AnyObject>){unsafe{
-            let destination=self.selected();let Some(name)=input("새 폴더",&format!("{} 안에 폴더를 만듭니다.",if destination.is_empty(){"과목 루트"}else{&destination}),"", "만들기")else{return;};
-            match rpc(json!({"op":"folder.create","workspace_id":self.ivars().workspace,"parent":destination,"name":name})){Ok(f)=>{let p=strv(&f,"path");let node=NSString::from_str(&p);{let mut nodes=self.ivars().nodes.borrow_mut();nodes.push(node.clone());nodes.sort_by_key(|n|n.to_string());}self.ivars().outline.reloadData();let root=self.ivars().nodes.borrow()[0].clone();self.ivars().outline.expandItem_expandChildren(Some(&root),true);let row=self.ivars().outline.rowForItem(Some(&node));if row>=0{self.ivars().outline.selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(row as usize),false);}},Err(e)=>alert("폴더를 만들 수 없습니다",&e)}
+            let destination=self.selected();let Some(name)=input("새 폴더",&format!("{} 안에 폴더를 만듭니다.",if destination.is_empty(){"자료 보관함 맨 위"}else{&destination}),"", "만들기")else{return;};
+            match rpc(json!({"op":"folder.create","workspace_id":self.ivars().workspace,"parent":destination,"name":name})){Ok(f)=>{let p=strv(&f,"path");let node=NSString::from_str(&p);{let mut nodes=self.ivars().nodes.borrow_mut();nodes.push(node.clone());nodes.sort_by_key(|n|n.to_string());}self.ivars().outline.reloadData();self.expand_to(&p);let row=self.ivars().outline.rowForItem(Some(&node));if row>=0{self.ivars().outline.selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(row as usize),false);}},Err(e)=>alert("폴더를 만들 수 없습니다",&e)}
         }}
     }
 );
@@ -88,14 +88,27 @@ impl FolderTree {
     unsafe fn children(&self, item: Option<&AnyObject>) -> Vec<Retained<NSString>> {
         let nodes = self.ivars().nodes.borrow();
         match item {
-            None => nodes.iter().filter(|n| n.is_empty()).cloned().collect(),
+            // Top-level folders are shown directly, without a root row.
+            None => nodes.iter().filter(|n| !n.to_string().contains('/')).cloned().collect(),
             Some(i) => {
                 let p = path(i);
                 nodes
                     .iter()
-                    .filter(|n| !n.is_empty() && parent(&n.to_string()) == p)
+                    .filter(|n| parent(&n.to_string()) == p)
                     .cloned()
                     .collect()
+            }
+        }
+    }
+    /// Expand every folder above `path` so a newly created folder is visible.
+    unsafe fn expand_to(&self, path: &str) {
+        let nodes = self.ivars().nodes.borrow().clone();
+        let mut prefix = String::new();
+        for part in parent(path).split('/').filter(|p| !p.is_empty()) {
+            if !prefix.is_empty() { prefix.push('/'); }
+            prefix.push_str(part);
+            if let Some(n) = nodes.iter().find(|n| n.to_string() == prefix) {
+                self.ivars().outline.expandItem(Some(n));
             }
         }
     }
@@ -141,10 +154,11 @@ pub unsafe fn choose(
     outline.setHeaderView(None);
     outline.setRowHeight(28.);
     outline.setAllowsMultipleSelection(false);
-    outline.setAllowsEmptySelection(false);
+    // No selection saves at the workspace's top level.
+    outline.setAllowsEmptySelection(true);
     outline.setIndentationPerLevel(18.);
     outline.setAutoresizesOutlineColumn(false);
-    let mut nodes = vec![NSString::from_str("")];
+    let mut nodes = Vec::new();
     if let Some(fs) = folders["folders"].as_array() {
         for f in fs {
             nodes.push(NSString::from_str(&strv(f, "path")));
@@ -162,9 +176,6 @@ pub unsafe fn choose(
     outline.setDataSource(Some(ProtocolObject::from_ref(&*target)));
     outline.setDelegate(Some(ProtocolObject::from_ref(&*target)));
     outline.reloadData();
-    let root = target.ivars().nodes.borrow()[0].clone();
-    outline.expandItem(Some(&root));
-    outline.selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(0), false);
     let scroll = crate::scrollbar::vertical(rect(0., 47., 460., 208.));
     scroll.setBorderType(NSBorderType::BezelBorder);
     scroll.setDocumentView(Some(&outline));

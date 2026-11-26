@@ -2059,14 +2059,11 @@ impl State {
         if self.map.is_none() && !self.snapshot {
             if let Some(doc) = self.document.as_ref().filter(|d| d["kind"] == "md") {
                 let parent = strv(doc, "parent");
-                self.subtitle.setStringValue(&NSString::from_str(&format!(
-                    "과목 루트{} · 변경 사항 자동 저장",
-                    if parent.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" / {parent}")
-                    }
-                )));
+                self.subtitle.setStringValue(&NSString::from_str(&if parent.is_empty() {
+                    "변경 사항 자동 저장".to_owned()
+                } else {
+                    format!("{parent} · 변경 사항 자동 저장")
+                }));
             }
         }
         let content = !self.text.string().to_string().trim().is_empty();
@@ -2866,7 +2863,7 @@ impl State {
             self.refresh_right();
         }
         let destination = if folder.is_empty() {
-            "과목 루트"
+            "자료 보관함"
         } else {
             folder
         };
@@ -2948,7 +2945,7 @@ impl State {
             return;
         }
         let destination = if parent.is_empty() {
-            "과목 루트"
+            "자료 보관함 맨 위"
         } else {
             parent
         };
@@ -3772,7 +3769,7 @@ impl State {
             false,
         );
         folders.setFont(Some(&font::regular(13.)));
-        folders.addItemWithTitle(&NSString::from_str("과목 루트"));
+        folders.addItemWithTitle(&NSString::from_str("자료 보관함 맨 위"));
         let mut paths = vec![String::new()];
         if let Ok(tree) = rpc(json!({"op":"tree","workspace_id":ws})) {
             if let Some(fs) = tree["folders"].as_array() {

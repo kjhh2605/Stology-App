@@ -495,13 +495,13 @@ define_class!(
         #[unsafe(method(outlineView:validateDrop:proposedItem:proposedChildIndex:))]
         unsafe fn validate_drop(&self, outline: &NSOutlineView, info: &ProtocolObject<dyn NSDraggingInfo>, item: Option<&AnyObject>, _index: isize) -> NSDragOperation {
             if let Some((_, destination)) = self.external_drop(info) {
-                let target = self.ivars().nodes.iter().find(|n| n.folder() && n.path == destination).unwrap();
-                outline.setDropItem_dropChildIndex(Some(&target.key), -1);
+                // The top level has no row of its own: target the whole outline.
+                let target = self.ivars().nodes.iter().find(|n| n.folder() && !n.path.is_empty() && n.path == destination);
+                outline.setDropItem_dropChildIndex(target.map(|n| &*n.key as &AnyObject), -1);
                 return NSDragOperation::Copy;
             }
             if self.drop_destination(info, item).is_some() {
-                let root: &AnyObject = &self.ivars().nodes[0].key;
-                outline.setDropItem_dropChildIndex(item.or(Some(root)), -1);
+                outline.setDropItem_dropChildIndex(item, -1);
                 NSDragOperation::Move
             } else { NSDragOperation::None }
         }
@@ -874,11 +874,13 @@ impl DocumentTree {
             rename.setEnabled(d["missing"] != true);
             menu.addItem(&rename);
         }
-        if let Some(node) = node {
-            let path = if let Some(document) = &node.document {
+        {
+            // Empty space stands for the workspace's top-level folder.
+            let path = if let Some(document) = node.and_then(|n| n.document.as_ref()) {
                 document["absolute_path"].as_str().map(PathBuf::from)
             } else {
-                self.ivars().root_path.as_ref().map(|root| root.join(&node.path))
+                let folder = node.map(|n| n.path.as_str()).unwrap_or("");
+                self.ivars().root_path.as_ref().map(|root| root.join(folder))
             };
             let finder = NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm()),
@@ -888,12 +890,12 @@ impl DocumentTree {
             );
             finder.setTarget(Some(self));
             finder.setImage(theme::icon("folder-open", 13.).as_deref());
-            finder.setEnabled(path.is_some() && node.document.as_ref().is_none_or(|d| d["missing"] != true));
+            finder.setEnabled(path.is_some() && node.and_then(|n| n.document.as_ref()).is_none_or(|d| d["missing"] != true));
             if let Some(path) = path {
                 finder.setRepresentedObject(Some(&NSString::from_str(&path.to_string_lossy())));
             }
             menu.addItem(&finder);
-            if node.document.is_some() {
+            if node.is_some_and(|n| n.document.is_some()) {
                 let title = NSString::from_str("삭제");
                 let item = NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm()), &title, Some(sel!(deleteDocument:)), &NSString::from_str(""));
                 item.setTarget(Some(self));
@@ -902,11 +904,10 @@ impl DocumentTree {
             }
         }
     }
-    /// Expands the root and every folder above `path`, outermost first. With
+    /// Expands every folder above `path`, outermost first. With
     /// `inclusive`, the folder at `path` itself is expanded as well.
     unsafe fn expand_ancestors(&self, path: &str, inclusive: bool) {
         let outline = &self.ivars().outline;
-        outline.expandItem(Some(&self.ivars().nodes[0].key));
         let mut ancestors: Vec<_> = self
             .ivars()
             .nodes
@@ -950,7 +951,6 @@ impl DocumentTree {
     }
     fn title(&self, node: &Node) -> String {
         match &node.document {
-            None if node.path.is_empty() => "과목 루트".into(),
             None => node.path.rsplit('/').next().unwrap_or(&node.path).into(),
             Some(d) => {
                 let ext = file_extension(d);
@@ -1018,7 +1018,6 @@ impl DocumentTree {
         let outline = &self.ivars().outline;
         outline.reloadData();
         outline.collapseItem_collapseChildren(None, true);
-        outline.expandItem(Some(&self.ivars().nodes[0].key));
         let mut folders: Vec<_> = self
             .ivars()
             .nodes
@@ -1037,20 +1036,21 @@ impl DocumentTree {
         self.select_document(active.as_deref());
         count
     }
+    /// The workspace's top level is shown directly, without a row of its own.
     unsafe fn children(&self, item: Option<&AnyObject>) -> Vec<&Node> {
-        match item {
-            None => vec![&self.ivars().nodes[0]],
+        let folder = match item {
+            None => "",
             Some(i) => match self.node(i) {
-                Some(n) if n.folder() => self
-                    .ivars()
-                    .nodes
-                    .iter()
-                    .skip(1)
-                    .filter(|c| parent(&c.path) == n.path && self.visible(c))
-                    .collect(),
-                _ => vec![],
+                Some(n) if n.folder() => n.path.as_str(),
+                _ => return vec![],
             },
-        }
+        };
+        self.ivars()
+            .nodes
+            .iter()
+            .skip(1)
+            .filter(|c| parent(&c.path) == folder && self.visible(c))
+            .collect()
     }
     unsafe fn folder_changed(&self, notification: &NSNotification, expanded: bool) {
         if self.ivars().restoring.get() {
@@ -1325,7 +1325,6 @@ pub unsafe fn build(
     menu.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
     outline.setMenu(Some(&menu));
     outline.reloadData();
-    outline.expandItem(Some(&controller.ivars().nodes[0].key));
     let mut folders: Vec<_> = controller
         .ivars()
         .nodes
