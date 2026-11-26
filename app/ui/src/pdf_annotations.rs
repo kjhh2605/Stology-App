@@ -25,7 +25,8 @@ const MARQUEE_TOOL: isize = 10;
 const NOTE_FONT_SIZE: f64 = 14.0;
 const NOTE_PADDING: f64 = 2.0;
 const NOTE_EDIT_WIDTH: f64 = 220.0;
-const NOTE_EDIT_HEIGHT: f64 = 80.0;
+const NOTE_MIN_WIDTH: f64 = 30.0;
+const NOTE_HANDLE: f64 = 8.0;
 fn number(v: &Value) -> f64 {
     v.as_f64().filter(|n| n.is_finite()).unwrap_or(0.0)
 }
@@ -418,6 +419,23 @@ unsafe fn note_size(text: &str, width: f64) -> NSSize {
         measured.size.height.ceil().max(line.size.height.ceil()) + NOTE_PADDING * 2.0,
     )
 }
+/// An unsized note widens with its text up to the typing width, then wraps.
+unsafe fn auto_note_size(text: &str) -> NSSize {
+    let size = note_size(text, NOTE_EDIT_WIDTH);
+    NSSize::new(size.width.max(NOTE_MIN_WIDTH), size.height)
+}
+/// Hide the stored memo while its in-place editor draws the same text.
+unsafe fn show_note(document: &AnyObject, value: &Value, visible: bool) {
+    let Some(p) = page(document, value["page"].as_u64().unwrap_or(0) as usize) else {
+        return;
+    };
+    let all: Retained<NSArray<AnyObject>> = msg_send![&*p, annotations];
+    for a in all.iter() {
+        if model(&a).is_some_and(|m| m["id"] == value["id"]) {
+            let _: () = msg_send![&*a, setShouldDisplay: visible];
+        }
+    }
+}
 fn note_rect_with_size(original: NSRect, size: NSSize) -> NSRect {
     NSRect::new(
         NSPoint::new(
@@ -431,7 +449,8 @@ struct NoteState {
     overlay: Weak<Overlay>,
     original: Value,
     current: RefCell<Value>,
-    layout_width: f64,
+    // Page-space size chosen with the editor's resize handle.
+    user_size: Cell<Option<NSSize>>,
     scale: f64,
 }
 define_class!(
@@ -442,19 +461,100 @@ define_class!(
  struct NoteEditor;
  impl NoteEditor {
   #[unsafe(method(didChangeText))] fn changed(&self){unsafe{let _:()=msg_send![super(self),didChangeText];self.grow_editor();self.commit();}}
+  #[unsafe(method(mouseDown:))] fn down(&self,event:&NSEvent){unsafe{if !self.track_resize(event){let _:()=msg_send![super(self),mouseDown:event];}}}
  }
 );
 impl NoteEditor {
+    fn handle_rect(&self) -> NSRect {
+        let b = self.bounds();
+        let y = if self.isFlipped() {
+            b.origin.y + b.size.height - NOTE_HANDLE
+        } else {
+            b.origin.y
+        };
+        NSRect::new(
+            NSPoint::new(b.origin.x + b.size.width - NOTE_HANDLE, y),
+            NSSize::new(NOTE_HANDLE, NOTE_HANDLE),
+        )
+    }
+    /// Drags the bottom-right handle while writing. The top-left corner stays
+    /// put, the text rewraps to the new width, and the height never clips text.
+    unsafe fn track_resize(&self, event: &NSEvent) -> bool {
+        let local = self.convertPoint_fromView(event.locationInWindow(), None);
+        let h = self.handle_rect();
+        let hit = NSRect::new(
+            NSPoint::new(h.origin.x - 4.0, h.origin.y - 4.0),
+            NSSize::new(h.size.width + 8.0, h.size.height + 8.0),
+        );
+        let (Some(window), Some(parent)) = (self.window(), self.superview()) else {
+            return false;
+        };
+        if !contains(hit, local) {
+            return false;
+        }
+        let scale = self.ivars().scale;
+        let start = self.frame();
+        let top = start.origin.y + start.size.height;
+        let p0 = parent.convertPoint_fromView(event.locationInWindow(), None);
+        let (dx, dy) = (
+            start.origin.x + start.size.width - p0.x,
+            start.origin.y - p0.y,
+        );
+        loop {
+            let Some(e) = window
+                .nextEventMatchingMask(NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp)
+            else {
+                break;
+            };
+            let p = parent.convertPoint_fromView(e.locationInWindow(), None);
+            let width = (p.x + dx - start.origin.x).max(NOTE_MIN_WIDTH * scale);
+            let fit = note_size(&self.string().to_string(), width / scale).height * scale;
+            let height = (top - (p.y + dy)).max(fit);
+            self.setFrame(NSRect::new(
+                NSPoint::new(start.origin.x, top - height),
+                NSSize::new(width, height),
+            ));
+            self.ivars()
+                .user_size
+                .set(Some(NSSize::new(width / scale, height / scale)));
+            self.setNeedsDisplay(true);
+            parent.setNeedsDisplay(true);
+            if e.r#type() == NSEventType::LeftMouseUp {
+                break;
+            }
+        }
+        true
+    }
+    /// Page-space memo size for the current text, and whether the user fixed it.
+    unsafe fn fitted_size(&self, text: &str) -> (NSSize, bool) {
+        let current = self.ivars().current.borrow();
+        let sized = self
+            .ivars()
+            .user_size
+            .get()
+            .or_else(|| (current["sized"] == true).then(|| bounds(&current).size));
+        match sized {
+            // A user-sized note keeps its width and only grows taller for text.
+            Some(user) => (
+                NSSize::new(
+                    user.width,
+                    user.height.max(note_size(text, user.width).height),
+                ),
+                true,
+            ),
+            None => (auto_note_size(text), false),
+        }
+    }
     unsafe fn grow_editor(&self) {
         let scale = self.ivars().scale;
-        let frame = self.frame();
-        let size = note_size(&self.string().to_string(), frame.size.width / scale);
-        let height = (size.height * scale).max(NOTE_EDIT_HEIGHT * scale);
-        if height > frame.size.height {
-            self.setFrame(note_rect_with_size(
-                frame,
-                NSSize::new(frame.size.width, height),
-            ));
+        let (size, _) = self.fitted_size(&self.string().to_string());
+        self.setFrame(note_rect_with_size(
+            self.frame(),
+            NSSize::new(size.width * scale, size.height * scale),
+        ));
+        self.setNeedsDisplay(true);
+        if let Some(parent) = self.superview() {
+            parent.setNeedsDisplay(true);
         }
     }
     unsafe fn finish(&self) -> bool {
@@ -466,11 +566,11 @@ impl NoteEditor {
         };
         let before = self.ivars().current.borrow().clone();
         let mut after = before.clone();
-        let size = note_size(
-            before["text"].as_str().unwrap_or(""),
-            self.ivars().layout_width,
-        );
+        let (size, sized) = self.fitted_size(before["text"].as_str().unwrap_or(""));
         after["bounds"] = rect_value(note_rect_with_size(bounds(&before), size));
+        if sized {
+            after["sized"] = json!(true);
+        }
         if after != before {
             if !overlay.record(command(before, after.clone()), false) {
                 return false;
@@ -494,6 +594,9 @@ impl NoteEditor {
         if before != after {
             if !o.record(command(before, after.clone()), false) {
                 return false;
+            }
+            if let Some(doc) = o.ivars().pdf.load().and_then(|pdf| document(&pdf)) {
+                show_note(&doc, &after, false);
             }
             *o.ivars().selected.borrow_mut() = vec![after.clone()];
             *self.ivars().current.borrow_mut() = after;
@@ -632,7 +735,28 @@ impl Overlay {
         };
         let selected = self.ivars().selected.borrow();
         NSColor::systemBlueColor().setStroke();
+        let memo = self.ivars().memo.borrow();
+        // The transparent editor sits on its memo; outline the live editor
+        // frame with the resize handle inside its bottom-right corner.
+        if let Some(m) = memo.as_ref() {
+            let f = m.frame();
+            let path = NSBezierPath::bezierPathWithRect(f);
+            path.setLineWidth(1.5);
+            path.stroke();
+            NSColor::systemBlueColor().setFill();
+            NSBezierPath::bezierPathWithRect(NSRect::new(
+                NSPoint::new(f.origin.x + f.size.width - NOTE_HANDLE, f.origin.y),
+                NSSize::new(NOTE_HANDLE, NOTE_HANDLE),
+            ))
+            .fill();
+        }
+        let editing = memo
+            .as_ref()
+            .map(|m| m.ivars().current.borrow()["id"].clone());
         for value in selected.iter() {
+            if editing.as_ref() == Some(&value["id"]) {
+                continue;
+            }
             let Some(rect) = self.annotation_rect(&pdf, &doc, value) else {
                 continue;
             };
@@ -801,8 +925,34 @@ impl Overlay {
             return false;
         }
         let current = m.ivars().current.borrow().clone();
-        if current != m.ivars().original {
-            self.push_history(command(m.ivars().original.clone(), current));
+        let original = m.ivars().original.clone();
+        if current["text"].as_str().unwrap_or("").trim().is_empty() {
+            // A memo left without text leaves no annotation behind. A memo
+            // created by this edit also drops its creation from history.
+            if self.record(command(current, Value::Null), false) {
+                self.ivars().selected.borrow_mut().clear();
+                let mut undo = self.ivars().undo.borrow_mut();
+                let created = undo
+                    .last()
+                    .is_some_and(|c| c["before"].is_null() && c["id"] == original["id"]);
+                if created {
+                    undo.pop();
+                    drop(undo);
+                } else {
+                    drop(undo);
+                    self.push_history(command(original, Value::Null));
+                }
+            }
+        } else {
+            if let Some(pdf) = self.ivars().pdf.load() {
+                if let Some(doc) = document(&pdf) {
+                    show_note(&doc, &current, true);
+                    annotations_changed(&pdf, &doc, current["page"].as_u64().unwrap_or(0) as usize);
+                }
+            }
+            if current != original {
+                self.push_history(command(original, current));
+            }
         }
         m.removeFromSuperview();
         self.ivars().memo.borrow_mut().take();
@@ -818,13 +968,7 @@ impl Overlay {
         let Some(p) = page(&doc, v["page"].as_u64().unwrap_or(0) as usize) else {
             return;
         };
-        let original = bounds(&v);
-        let layout_width = original.size.width.max(NOTE_EDIT_WIDTH);
-        let editing = note_rect_with_size(
-            original,
-            NSSize::new(layout_width, original.size.height.max(NOTE_EDIT_HEIGHT)),
-        );
-        let r: NSRect = msg_send![&*pdf,convertRect:editing,fromPage:&*p];
+        let r: NSRect = msg_send![&*pdf,convertRect:bounds(&v),fromPage:&*p];
         let r = self.convertRect_fromView(r, Some(&pdf));
         let scale: f64 = msg_send![&*pdf, scaleFactor];
         let scale = if scale.is_finite() {
@@ -836,11 +980,16 @@ impl Overlay {
             overlay: Weak::new(self),
             original: v.clone(),
             current: RefCell::new(v.clone()),
-            layout_width,
+            user_size: Cell::new(None),
             scale,
         });
         let text: Retained<NoteEditor> = msg_send![super(allocated),initWithFrame:r];
         text.setRichText(false);
+        // grow_editor owns the frame; native self-sizing would keep the bottom
+        // edge fixed and shift the text away from the memo.
+        text.setVerticallyResizable(false);
+        text.setHorizontallyResizable(false);
+        text.setMinSize(NSSize::new(0.0, 0.0));
         text.setFont(Some(&crate::font::regular(NOTE_FONT_SIZE * scale)));
         text.setTextContainerInset(NSSize::new(NOTE_PADDING * scale, NOTE_PADDING * scale));
         if let Some(container) = text.textContainer() {
@@ -848,10 +997,13 @@ impl Overlay {
         }
         text.setString(&NSString::from_str(v["text"].as_str().unwrap_or("")));
         text.grow_editor();
-        text.setBackgroundColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
-            1.0, 0.99, 0.84, 1.0,
-        ));
-        text.setTextColor(Some(&NSColor::textColor()));
+        text.setDrawsBackground(false);
+        // Same color as the stored FreeText so editing looks like the memo itself.
+        text.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            0.13, 0.34, 0.88, 1.0,
+        )));
+        show_note(&doc, &v, false);
+        annotations_changed(&pdf, &doc, v["page"].as_u64().unwrap_or(0) as usize);
         text.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
         self.addSubview(&text);
         if let Some(w) = self.window() {
@@ -921,12 +1073,8 @@ impl Overlay {
             };
             current = json!({"schema":1,"id":uuid(),"page":index,"type":kind,"bounds":[p.x,p.y,1.0,1.0],"text":"","points":[[p.x,p.y]]});
             if tool == 4 {
-                current["bounds"] = json!([
-                    p.x,
-                    p.y - NOTE_EDIT_HEIGHT,
-                    NOTE_EDIT_WIDTH,
-                    NOTE_EDIT_HEIGHT
-                ]);
+                let size = auto_note_size("");
+                current["bounds"] = json!([p.x, p.y - size.height, size.width, size.height]);
                 if self.record(command(Value::Null, current.clone()), true) {
                     *self.ivars().selected.borrow_mut() = vec![current.clone()];
                     self.edit_note(current);
@@ -1001,15 +1149,26 @@ impl Overlay {
         } else {
             let r = bounds(&g.before);
             let mut target = r;
+            let note = g.before["type"] == "note";
             if g.resize {
-                target.origin.y = p.y.min(r.origin.y + r.size.height - 2.0);
-                target.size.width = (p.x - r.origin.x).max(2.0);
-                target.size.height = r.origin.y + r.size.height - target.origin.y;
+                let top = r.origin.y + r.size.height;
+                target.origin.y = p.y.min(top - 2.0);
+                target.size.width = (p.x - r.origin.x).max(if note { NOTE_MIN_WIDTH } else { 2.0 });
+                target.size.height = top - target.origin.y;
+                if note {
+                    let text = g.before["text"].as_str().unwrap_or("");
+                    let fit = note_size(text, target.size.width).height;
+                    target.size.height = target.size.height.max(fit);
+                    target.origin.y = top - target.size.height;
+                }
             } else {
                 target.origin.x += p.x - g.start.x;
                 target.origin.y += p.y - g.start.y;
             }
             g.current = transform(&g.before, target);
+            if note && g.resize {
+                g.current["sized"] = json!(true);
+            }
         }
         let Some(pdf) = self.ivars().pdf.load() else {
             return;

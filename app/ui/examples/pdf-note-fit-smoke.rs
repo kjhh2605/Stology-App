@@ -1,13 +1,13 @@
 //! Native memo bounds regression. Hidden windows and temporary PDF files only.
 //! cargo run --manifest-path local-app/ui/Cargo.toml --example pdf-note-fit-smoke
+#[path = "support/controls.rs"]
+#[allow(dead_code)]
+mod controls;
 #[path = "../src/font.rs"]
 mod font;
 #[path = "../src/pdf_annotations.rs"]
 #[allow(dead_code)]
 mod pdf_annotations;
-#[path = "support/controls.rs"]
-#[allow(dead_code)]
-mod controls;
 use controls::{choose, key};
 use objc2::{
     class, msg_send,
@@ -223,11 +223,42 @@ impl Fixture {
             ),
             2,
         );
+        self.assert_in_place(true);
+    }
+    /// The editor covers the stored memo exactly and hides its drawing.
+    unsafe fn assert_in_place(&self, reopened: bool) {
         let editor = text_editor(&self.window);
+        let note = self.note();
+        let r: NSRect = msg_send![&*self.pdf,convertRect:rect(&note),fromPage:&*self.page];
+        let r = self.overlay.convertRect_fromView(r, Some(&self.pdf));
+        let e = editor.frame();
         assert!(
-            editor.frame().size.width >= 150.,
-            "reopened editor should have comfortable typing width"
+            (e.origin.x - r.origin.x).abs() < 0.5
+                && (top(e) - top(r)).abs() < 0.5
+                && (!reopened || (e.size.width - r.size.width).abs() < 0.5),
+            "editor {e:?} is not on memo {r:?}"
         );
+        assert!(!self.displayed(), "stored memo still drawn under editor");
+    }
+    unsafe fn displayed(&self) -> bool {
+        let all: Retained<objc2_foundation::NSArray<AnyObject>> =
+            msg_send![&*self.page, annotations];
+        all.iter().any(|a| {
+            let shown: bool = msg_send![&*a, shouldDisplay];
+            shown
+        })
+    }
+    unsafe fn edit_sized(&self) {
+        choose(&self.root, 1);
+        let r = rect(&self.note());
+        self.click(
+            self.point(
+                r.origin.x + r.size.width / 2.,
+                r.origin.y + r.size.height / 2.,
+            ),
+            2,
+        );
+        self.assert_in_place(true);
     }
     unsafe fn marquee(&self, r: NSRect) {
         choose(&self.root, 10);
@@ -261,13 +292,97 @@ impl Fixture {
         );
     }
 }
+unsafe fn post(window: &NSWindow, kind: NSEventType, location: NSPoint) {
+    let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        kind, location, NSEventModifierFlags::empty(), 0., window.windowNumber(), None, 0, 1, 1.).unwrap();
+    window.postEvent_atStart(&event, false);
+}
+unsafe fn empty_and_resize() {
+    // A fresh memo closed without text vanishes and leaves no undo step.
+    let f = Fixture::new();
+    f.create_note("");
+    assert!(pdf_annotations::commit_pending(&f.root));
+    assert!(pdf_annotations::read_page(&f.document, 0).is_empty());
+    choose(&f.root, 7);
+    assert!(pdf_annotations::read_page(&f.document, 0).is_empty());
+    f.roundtrip();
+    // The editor's bottom-right handle sets a width that survives completion
+    // and reopening; the text rewraps and the height never clips it.
+    let f = Fixture::new();
+    // Queued events keep window coordinates only for an on-screen origin.
+    if let Some(screen) = f.window.screen() {
+        let v = screen.visibleFrame();
+        f.window
+            .setFrameTopLeftPoint(NSPoint::new(v.origin.x, v.origin.y + v.size.height));
+    }
+    let text = "가나다라마바사아자차카타파하".repeat(3);
+    f.create_note(&text);
+    let editor = text_editor(&f.window);
+    let frame = editor.frame();
+    let corner = editor.superview().unwrap().convertPoint_toView(
+        NSPoint::new(frame.origin.x + frame.size.width - 3., frame.origin.y + 3.),
+        None,
+    );
+    let target = NSPoint::new(corner.x - 80., corner.y - 60.);
+    post(&f.window, NSEventType::LeftMouseDragged, target);
+    post(&f.window, NSEventType::LeftMouseUp, target);
+    let down = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        NSEventType::LeftMouseDown, corner, NSEventModifierFlags::empty(), 0., f.window.windowNumber(), None, 0, 1, 1.).unwrap();
+    let _: () = msg_send![&*editor,mouseDown:&*down];
+    let resized = editor.frame();
+    assert!(
+        (resized.size.width - (frame.size.width - 80.)).abs() < 1.,
+        "handle drag did not narrow editor: {frame:?} -> {resized:?}"
+    );
+    assert!(
+        (top(resized) - top(frame)).abs() < 0.001,
+        "handle drag moved the top"
+    );
+    assert!(pdf_annotations::commit_pending(&f.root));
+    let sized = f.note();
+    let r = rect(&sized);
+    assert_eq!(sized["sized"], true);
+    assert!(
+        (r.size.width - (frame.size.width - 80.) / 0.8).abs() < 1. && r.size.height > 60.,
+        "sized memo lost chosen width or clipped text: {r:?}"
+    );
+    f.roundtrip();
+    f.edit_sized();
+    assert!(pdf_annotations::commit_pending(&f.root));
+    assert_eq!(f.note(), sized, "reopening changed a sized memo");
+    choose(&f.root, 7);
+    assert!((rect(&f.note()).size.width - r.size.width).abs() > 1.);
+    choose(&f.root, 8);
+    // The selection tool's corner handle also fixes the width and keeps text whole.
+    choose(&f.root, 1);
+    let start = f.point(r.origin.x + r.size.width - 1., r.origin.y + 1.);
+    let end = f.point(
+        r.origin.x + r.size.width + 100.,
+        r.origin.y + r.size.height - 5.,
+    );
+    mouse(&f.overlay, &f.window, NSEventType::LeftMouseDown, start, 1);
+    mouse(&f.overlay, &f.window, NSEventType::LeftMouseDragged, end, 1);
+    mouse(&f.overlay, &f.window, NSEventType::LeftMouseUp, end, 1);
+    let wide = f.note();
+    let w = rect(&wide);
+    assert_eq!(wide["sized"], true);
+    assert!((w.size.width - (r.size.width + 100.)).abs() < 1., "{w:?}");
+    assert!(w.size.height >= 20., "selection resize clipped text: {w:?}");
+    assert!((top(w) - top(r)).abs() < 0.001);
+    f.edit_sized();
+    assert!(pdf_annotations::commit_pending(&f.root));
+    assert_eq!(rect(&f.note()).size.width, w.size.width);
+    f.roundtrip();
+}
 fn main() {
     unsafe {
         objc2::rc::autoreleasepool(|_| {
             let _app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
             let f = Fixture::new();
             let initial = f.create_note("ABC");
+            f.assert_in_place(false);
             assert!(pdf_annotations::commit_pending(&f.root));
+            assert!(f.displayed(), "memo stayed hidden after editing");
             let short = f.note();
             let compact = rect(&short);
             assert!(
@@ -353,20 +468,24 @@ fn main() {
             assert!(pdf_annotations::commit_pending(&f.root));
             assert_eq!(f.note()["text"], "다시 작성한 메모");
             f.roundtrip();
-            // Whitespace/empty notes preserve exact content and finite minimum bounds.
-            for text in ["  가 나  ", "", "\n"] {
+            // Surrounding whitespace is kept; a memo emptied of text is deleted
+            // and one undo restores it.
+            f.edit();
+            replace_text(&f.window, "  가 나  ");
+            assert!(pdf_annotations::commit_pending(&f.root));
+            assert_eq!(f.note()["text"], "  가 나  ");
+            let spaced = f.note();
+            for text in ["", "\n", "   "] {
                 f.edit();
                 replace_text(&f.window, text);
                 assert!(pdf_annotations::commit_pending(&f.root));
-                let note = f.note();
-                let r = rect(&note);
-                assert_eq!(note["text"], text);
                 assert!(
-                    r.size.width.is_finite()
-                        && r.size.width > 0.
-                        && r.size.height.is_finite()
-                        && r.size.height > 0.
+                    pdf_annotations::read_page(&f.document, 0).is_empty(),
+                    "emptied memo {text:?} left an annotation"
                 );
+                f.roundtrip();
+                choose(&f.root, 7);
+                assert_eq!(f.note(), spaced, "undo did not restore emptied memo");
             }
             f.roundtrip();
             // Word wrapping and unbroken runs retain contents and stable geometry
@@ -395,6 +514,7 @@ fn main() {
                     "reopening a note changed fitted geometry"
                 );
             }
+            empty_and_resize();
             for rotation in [0isize, 90, 180, 270] {
                 for scale in [0.5, 0.8] {
                     let f = Fixture::new();
@@ -423,7 +543,7 @@ fn main() {
                     f.roundtrip();
                 }
             }
-            println!("PASS PDF note fit: short text bounds + stable top-left anchor, compact marquee delete/undo UUID, Korean multiline height, native character deletion and shrink, rejected fit retains editor/data, whitespace/empty content, 4 rotations at 50/80%, PDF save/reopen");
+            println!("PASS PDF note fit: empty memo removal, editor/selection resize handles, short text bounds + stable top-left anchor, compact marquee delete/undo UUID, Korean multiline height, native character deletion and shrink, rejected fit retains editor/data, whitespace content, 4 rotations at 50/80%, PDF save/reopen");
         });
     }
 }
