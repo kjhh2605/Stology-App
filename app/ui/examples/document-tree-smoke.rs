@@ -637,8 +637,39 @@ fn main() {
             document_tree::drain().is_empty(),
             "filter must not open files or persist temporary expansion"
         );
+        // The analysis mark sits in the gutter left of its cell, which clips
+        // the mark's own tooltip away; the row that spans the gutter must
+        // receive the pointer there, since it carries the tooltip.
+        let marked = json!({"folders":[{"path":"folder"}],"entries":[
+            {"id":"stale","title":"Stale note","path":"folder/stale.md","kind":"md","analysis_state":"stale"}
+        ]});
+        let mut open = HashSet::new();
+        open.insert("folder".to_owned());
+        let (marked_scroll, _marked_controller) =
+            document_tree::build(&marked, None, &open, &Default::default(), rect(0., 0., 300., 500.));
+        window.setContentView(Some(&marked_scroll));
+        marked_scroll.layoutSubtreeIfNeeded();
+        let marked_outline: Retained<NSOutlineView> =
+            Retained::cast_unchecked(marked_scroll.documentView().unwrap());
+        let cell = document_cell(&marked_outline, "stale");
+        let dot = cell
+            .subviews()
+            .iter()
+            .find(|view| view.toolTip().is_some())
+            .expect("analysis mark missing")
+            .clone();
+        assert_eq!(dot.toolTip().unwrap().to_string(), "문서가 바뀌어 다시 분석이 필요해요");
+        let centre = dot.frame();
+        let centre = NSPoint::new(centre.origin.x + 4., centre.origin.y + 4.);
+        let frame_view = window.contentView().unwrap().superview().unwrap();
+        let hit = frame_view.hitTest(cell.convertPoint_toView(centre, None));
+        let row = cell.superview().unwrap();
+        assert!(
+            hit.is_some_and(|hit| std::ptr::eq(&*hit, &*row)),
+            "pointer over analysis mark does not reach the row carrying its tooltip"
+        );
         window.setContentView(None);
         let _: () = msg_send![&pb, releaseGlobally];
-        println!("document-tree-smoke: hierarchy, badges, context menus, selection, external file copy destinations/URLs, move validation, inline rename target/commit/cancel/blur/retry/IME passed");
+        println!("document-tree-smoke: hierarchy, badges, context menus, selection, external file copy destinations/URLs, move validation, inline rename target/commit/cancel/blur/retry/IME, analysis mark tooltip hit passed");
     }
 }

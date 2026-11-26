@@ -139,8 +139,10 @@ unsafe fn analysis_indicator(mark: &Mark) -> Retained<NSView> {
         dot
     };
     view.setToolTip(Some(&NSString::from_str(&mark.describe())));
+    view.setIdentifier(Some(&NSString::from_str(ANALYSIS_INDICATOR)));
     view
 }
+const ANALYSIS_INDICATOR: &str = "analysis-indicator";
 fn supports_analysis(document: &Value) -> bool {
     matches!(
         document["kind"].as_str(),
@@ -353,6 +355,7 @@ pub(crate) unsafe fn add_row_date(row: &NSButton, text: &str) {
 struct RowState {
     outlined: Cell<bool>,
     active: Cell<bool>,
+    tips: std::cell::RefCell<Vec<Retained<NSString>>>,
 }
 define_class!(
     #[unsafe(super(NSTableRowView))]
@@ -398,6 +401,28 @@ define_class!(
         }
         #[unsafe(method(isDocumentActive))]
         fn active(&self) -> bool { self.ivars().active.get() }
+        // The analysis mark sits in the gutter outside its cell, which clips
+        // the mark's own tooltip area away. The row spans the gutter, so it
+        // carries the tooltip instead.
+        #[unsafe(method(layout))]
+        fn layout(&self) { unsafe {
+            let _: () = msg_send![super(self), layout];
+            self.removeAllToolTips();
+            let mut tips = self.ivars().tips.borrow_mut();
+            tips.clear();
+            for cell in self.subviews().iter() {
+                for view in cell.subviews().iter() {
+                    if view.isHidden() || !view.identifier().is_some_and(|id| id.to_string() == ANALYSIS_INDICATOR) {
+                        continue;
+                    }
+                    let Some(tip) = view.toolTip() else { continue };
+                    let area = self.convertRect_fromView(view.bounds(), Some(&view));
+                    self.addToolTipRect_owner_userData(area, &tip, std::ptr::null_mut());
+                    // The row does not retain tooltip owners.
+                    tips.push(tip);
+                }
+            }
+        }}
     }
 );
 define_class!(
@@ -548,7 +573,7 @@ define_class!(
         unsafe fn row_view(&self, outline: &NSOutlineView, item: &AnyObject) -> Option<Retained<NSTableRowView>> { (|| {
             let n = self.node(item)?;
             let row: Retained<DocumentRow> = msg_send![super(DocumentRow::alloc(mtm()).set_ivars(RowState {
-                outlined: Cell::new(false), active: Cell::new(self.active(n))
+                outlined: Cell::new(false), active: Cell::new(self.active(n)), tips: Default::default()
             })), initWithFrame: rect(0., 0., outline.bounds().size.width, 38.)];
             row.setBackgroundColor(&NSColor::clearColor());
             Some(row.into_super())
