@@ -1708,6 +1708,10 @@ fn label_candidate(s: &State, i: usize, focus: Option<usize>) -> (i32, Tone, boo
     if s.hits[i] {
         return (80, Tone::Search, false);
     }
+    // While searching, only matching concepts name themselves.
+    if !normalize(&s.query).is_empty() {
+        return (-1, Tone::Default, false);
+    }
     (s.nodes[i].degree.min(12) as i32, Tone::Default, false)
 }
 fn label_rect(
@@ -3147,6 +3151,21 @@ mod tests {
         assert_eq!(selection["evidence"][0]["source_id"], "source1");
         assert_eq!(selection["assertions"][0]["negated"], true);
         assert!(s.links[link(&s, "e1")].label.contains("조건"));
+    }
+    #[test]
+    fn search_labels_only_matching_concepts() {
+        let mut s = sample();
+        assert!(label_candidate(&s, node(&s, "c"), None).0 >= 0);
+        s.query = "광합성".into();
+        refresh_hits(&mut s);
+        assert_eq!(label_candidate(&s, node(&s, "a"), None).1, Tone::Search);
+        assert!(label_candidate(&s, node(&s, "c"), None).0 < 0);
+        // A hovered concept and its neighbours still name themselves.
+        let b = node(&s, "b");
+        assert!(label_candidate(&s, b, Some(b)).0 >= 0);
+        s.query = "  ".into();
+        refresh_hits(&mut s);
+        assert!(label_candidate(&s, node(&s, "c"), None).0 >= 0);
     }
     #[test]
     fn ray_pick_tracks_nearest_depth_after_orbit() {
