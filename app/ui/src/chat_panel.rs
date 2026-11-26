@@ -894,6 +894,16 @@ impl Panel {
         }
         Ok(())
     }
+    /// The conversation scroll position for a workspace, to keep across launches.
+    pub unsafe fn position_for(&self, ws: &str) -> Option<NSPoint> {
+        if self.workspace.as_deref() == Some(ws) {
+            return Some(self.messages.position());
+        }
+        self.positions.get(&format!("{:?}/{}", Some(ws), self.selected)).copied()
+    }
+    pub fn seed_position(&mut self, ws: &str, position: NSPoint) {
+        self.positions.entry(format!("{:?}/{}", Some(ws), self.selected)).or_insert(position);
+    }
     pub unsafe fn forget_workspace(&mut self) {
         self.quiet_since = None;
         self.workspace = None;

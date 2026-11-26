@@ -60,6 +60,7 @@ pub(super) fn delete(root: &Path, c: &Connection, id: &str) -> Result<()> {
     let mut paths = vec![
         root.join("workspaces").join(id),
         root.join("ai/runs").join(format!("latest-{id}.json")),
+        crate::screen::screen_path(root, id)?,
     ];
     use std::io::Read;
     use std::os::fd::AsRawFd;
@@ -286,7 +287,12 @@ mod tests {
             call(json!({"op":"workspace.rename","workspace_id":w,"name":"새 이름"}))["id"],
             *w
         );
+        for (subject, _) in &subjects {
+            crate::screen::handle(root, &json!({"op":"screen.save","workspace_id":subject,"screen":{"map_open":true}})).unwrap();
+        }
         call(json!({"op":"workspace.delete","workspace_id":w}));
+        assert!(!crate::screen::screen_path(root, w.as_str().unwrap()).unwrap().exists());
+        assert!(crate::screen::screen_path(root, subjects[1].0.as_str().unwrap()).unwrap().exists());
         assert!(Path::new(snap["immutable_path"].as_str().unwrap()).is_file());
         assert!(!root.join("workspaces").join(w.as_str().unwrap()).exists());
         assert_eq!(

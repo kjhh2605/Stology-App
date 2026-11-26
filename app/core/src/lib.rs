@@ -9,6 +9,7 @@ pub mod organize;
 pub mod pdf_recovery;
 mod generated_pdf;
 pub mod providers;
+pub mod screen;
 pub mod skills;
 pub mod storage;
 
@@ -37,6 +38,7 @@ pub fn dispatch(root: &Path, request: &Value) -> Result<Value> {
         .and_then(Value::as_str)
         .context("op가 필요합니다")?;
     if op.starts_with("chat.") { return chat::handle(root, request); }
+    if op.starts_with("screen.") { return screen::handle(root, request); }
     if op == "pdf.recovery.discard" {
         pdf_recovery::discard_recovery(root, request["id"].as_str().context("id가 필요합니다")?)?;
         return Ok(json!({"discarded":true}));

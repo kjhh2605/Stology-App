@@ -37,6 +37,7 @@ mod pdf_session;
 mod organize_panel;
 mod pptx_preview;
 mod save_dialog;
+mod screen_state;
 mod scrollbar;
 mod shortcut_panel;
 mod sidebar_layout;
@@ -93,7 +94,7 @@ define_class!(
             });
             match ready {
                 Some(Ok(true)) => {
-                    STATE.with(|s| if let Some(s) = s.borrow_mut().as_mut() { unsafe { s.cancel_background_work(); } });
+                    STATE.with(|s| if let Some(s) = s.borrow_mut().as_mut() { unsafe { s.save_screen(); s.cancel_background_work(); } });
                     NSApplicationTerminateReply::TerminateNow
                 }
                 Some(Err(error)) => {
@@ -228,7 +229,7 @@ define_class!(
                 });
                 match result {
                     Some(Ok(true)) => {
-                        STATE.with(|s| if let Some(s) = s.borrow_mut().as_mut() { s.cancel_background_work(); });
+                        STATE.with(|s| if let Some(s) = s.borrow_mut().as_mut() { s.save_screen(); s.cancel_background_work(); });
                         PENDING_QUIT.with(|p| p.set(false)); PDF_QUIT_PENDING.with(|p| p.set(false));
                         timer.invalidate(); app.replyToApplicationShouldTerminate(true);
                     }
@@ -379,6 +380,9 @@ unsafe fn pdf_view(view: &NSView) -> Option<Retained<NSView>> {
 
 struct State {
     screens: std::collections::HashMap<String, WorkspaceScreen>,
+    saved_signature: String,
+    /// Reapplied once the restored note has been laid out in the window.
+    pending_scroll: Option<NSPoint>,
     current_evidence: Option<Value>,
     target: Retained<Delegate>,
     workspace_rows: Vec<(String, Retained<NSView>, Retained<NSButton>)>,
@@ -2234,7 +2238,13 @@ impl State {
         }
     }
     unsafe fn remember_screen(&mut self) {
-        let Some(id) = self.workspace.clone() else { return };
+        self.save_screen();
+        if let Some((id, screen)) = self.current_screen() {
+            self.screens.insert(id, screen);
+        }
+    }
+    unsafe fn current_screen(&self) -> Option<(String, WorkspaceScreen)> {
+        let id = self.workspace.clone()?;
         let pdf_page = self.preview.as_ref().and_then(|p| pdf_view(p)).and_then(|pdf| {
             let page: Option<Retained<AnyObject>> = msg_send![&*pdf, currentPage];
             let doc: Option<Retained<AnyObject>> = msg_send![&*pdf, document];
@@ -2245,7 +2255,7 @@ impl State {
         if let Some(d) = document.as_mut().filter(|d| d["kind"] == "suggestion") {
             d["body"] = json!(self.last_text);
         }
-        self.screens.insert(id, WorkspaceScreen {
+        Some((id, WorkspaceScreen {
             blank_title: self.blank_title.clone(),
             file_query: self.last_file_query.clone(),
             document,
@@ -2255,12 +2265,18 @@ impl State {
             map_open: self.map.is_some(),
             folders: self.open_folders.clone(),
             pdf_page,
-        });
+        }))
     }
 
     unsafe fn restore_screen(&mut self) {
         self.show_blank();
-        let screen = self.workspace.as_ref().and_then(|id| self.screens.remove(id));
+        let screen = match self.workspace.clone() {
+            Some(id) => match self.screens.remove(&id) {
+                Some(screen) => Some(screen),
+                None => self.load_saved_screen(&id),
+            },
+            None => None,
+        };
         self.last_file_query = screen.as_ref().map(|s| s.file_query.clone()).unwrap_or_default();
         if let Some(field) = &self.file_search {
             field.setStringValue(&NSString::from_str(&self.last_file_query));
@@ -2276,7 +2292,8 @@ impl State {
         let length = self.text.string().length();
         let start = screen.selection.location.min(length);
         self.text.setSelectedRange(NSRange::new(start, screen.selection.length.min(length - start)));
-        self.text.scrollPoint(screen.scroll);
+        self.scroll_note_to(screen.scroll);
+        self.pending_scroll = (screen.scroll.y > 0.).then_some(screen.scroll);
         if let Some((pdf, index)) = self.preview.as_ref().and_then(|p| pdf_view(p)).zip(screen.pdf_page) {
             let doc: Option<Retained<AnyObject>> = msg_send![&*pdf, document];
             if let Some(doc) = doc {
@@ -2290,7 +2307,26 @@ impl State {
         if screen.map_open { self.open_map(); }
     }
 
+    /// A freshly opened note is laid out lazily; until then its height clamps
+    /// the scroll to the top.
+    unsafe fn scroll_note_to(&self, point: NSPoint) {
+        // TextKit 2: asking for `layoutManager` would downgrade the editor.
+        if let Some(manager) = self.text.textLayoutManager() {
+            if let Some(content) = manager.textContentManager() {
+                manager.ensureLayoutForRange(&content.documentRange());
+                let used = manager.usageBoundsForTextContainer();
+                let height = used.origin.y + used.size.height + 2. * self.text.textContainerInset().height;
+                let mut size = self.text.frame().size;
+                if size.height < height {
+                    size.height = height;
+                    self.text.setFrameSize(size);
+                }
+            }
+        }
+        self.text.scrollPoint(point);
+    }
     unsafe fn show_blank(&mut self) {
+        self.pending_scroll = None;
         self.snapshot = false;
         self.document = None;
         self.blank_title = "제목 없음".into();
@@ -3883,24 +3919,28 @@ impl State {
             p.selectItemAtIndex(old.max(0).min(p.numberOfItems() - 1));
         }
     }
+    unsafe fn map_preference(&self) -> Value {
+        let selected = graph::selection()
+            .and_then(|v| v["concept"]["id"].as_str().map(str::to_string))
+            .unwrap_or_default();
+        let relation = self
+            .relation
+            .as_ref()
+            .map(|p| p.indexOfSelectedItem())
+            .filter(|i| *i > 0)
+            .and_then(|i| {
+                self.graph_data["relations"]
+                    .as_array()
+                    .and_then(|rs| rs.get(i as usize - 1))
+            })
+            .map(|r| strv(r, "id"))
+            .unwrap_or_default();
+        json!({"selected":selected,"relation":relation,"query":self.last_query,"nodes_open":self.nodes_open,"node_limit":self.node_limit,"view":graph::snapshot_view()})
+    }
     unsafe fn close_map(&mut self) {
         if let Some(ws) = self.workspace.clone() {
-            let selected = graph::selection()
-                .and_then(|v| v["concept"]["id"].as_str().map(str::to_string))
-                .unwrap_or_default();
-            let relation = self
-                .relation
-                .as_ref()
-                .map(|p| p.indexOfSelectedItem())
-                .filter(|i| *i > 0)
-                .and_then(|i| {
-                    self.graph_data["relations"]
-                        .as_array()
-                        .and_then(|rs| rs.get(i as usize - 1))
-                })
-                .map(|r| strv(r, "id"))
-                .unwrap_or_default();
-            self.map_preferences.insert(ws,json!({"selected":selected,"relation":relation,"query":self.last_query,"nodes_open":self.nodes_open,"node_limit":self.node_limit,"view":graph::snapshot_view()}));
+            let preference = self.map_preference();
+            self.map_preferences.insert(ws, preference);
         }
         if let Some(v) = self.map.take() {
             v.removeFromSuperview();
@@ -4929,6 +4969,10 @@ impl State {
     }
     unsafe fn tick(&mut self) {
         self.update_ai_spinner();
+        if let Some(scroll) = self.pending_scroll.take() {
+            if self.preview.is_none() && self.map.is_none() { self.scroll_note_to(scroll); }
+        }
+        self.save_screen_if_changed();
         self.poll_cleanup();
         let ws = self.workspace.clone();
         self.chat.connection(self.provider_info.as_ref());
@@ -5772,6 +5816,8 @@ fn main() {
             desc_concept: String::new(),
             desc_plain: String::new(),
             screens: Default::default(),
+            saved_signature: String::new(),
+            pending_scroll: None,
             current_evidence: None,
             map_preferences: std::collections::HashMap::new(),
             relation: None,
@@ -5932,7 +5978,9 @@ fn main() {
             }
         }
         window.setContentView(Some(&root));
-        window.center();
+        if !window.setFrameUsingName(&NSString::from_str("StologyLocalMain")) {
+            window.center();
+        }
         // Attaching the root gives it the restored window's actual content size.
         s.layout(root.bounds().size);
         s.update_header();
@@ -5942,6 +5990,7 @@ fn main() {
         }));
         editor::set_image_importer(import_image);
         STATE.with(|state| *state.borrow_mut() = Some(s));
+        STATE.with(|state| if let Some(s) = state.borrow_mut().as_mut() { s.restore_launch(); });
         window.makeKeyAndOrderFront(None);
         app.activateIgnoringOtherApps(true);
         let _timer: Retained<NSTimer> = msg_send![NSTimer::class(),scheduledTimerWithTimeInterval:0.20f64 target:&*target selector:sel!(tick:) userInfo:std::ptr::null::<AnyObject>() repeats:true];
