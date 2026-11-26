@@ -172,13 +172,13 @@ define_class!(
 );
 struct CodeLanguageState {
     text: Weak<NSTextView>,
-    range: NSRange,
-    fingerprint: u64,
-    fence: String,
+    range: std::cell::Cell<NSRange>,
+    fingerprint: std::cell::Cell<u64>,
+    fence: RefCell<String>,
     language: String,
 }
 struct CodeCopyState {
-    code: String,
+    code: RefCell<String>,
 }
 define_class!(
     #[unsafe(super(NSButton, NSControl, NSView, NSResponder))]
@@ -191,7 +191,7 @@ define_class!(
         fn copy_code(&self, _sender: Option<&AnyObject>) { unsafe {
             let pasteboard = NSPasteboard::generalPasteboard();
             pasteboard.clearContents();
-            pasteboard.setString_forType(&NSString::from_str(&self.ivars().code), NSPasteboardTypeString);
+            pasteboard.setString_forType(&NSString::from_str(&self.ivars().code.borrow()), NSPasteboardTypeString);
             self.setTitle(&NSString::from_str("복사됨"));
         }}
     }
@@ -211,14 +211,15 @@ define_class!(
             let marked: bool = msg_send![&*text, hasMarkedText];
             if !text.isEditable() || marked { return; }
             let source = text.string().to_string();
-            if fingerprint(&source) != state.fingerprint { return; }
+            if fingerprint(&source) != state.fingerprint.get() { return; }
             let index = self.indexOfSelectedItem() as usize;
             let language = CODE_LANGUAGES.get(index).map(|(id, _)| *id).unwrap_or(&state.language);
-            let replacement = format!("{}{}\n", state.fence, language);
+            let replacement = format!("{}{}\n", state.fence.borrow(), language);
             let selection: NSRange = msg_send![&*text, selectedRange];
-            let delta = replacement.encode_utf16().count() as isize - state.range.length as isize;
-            let _: () = msg_send![&*text, insertText:&*NSString::from_str(&replacement), replacementRange:state.range];
-            if selection.location >= state.range.location + state.range.length {
+            let range = state.range.get();
+            let delta = replacement.encode_utf16().count() as isize - range.length as isize;
+            let _: () = msg_send![&*text, insertText:&*NSString::from_str(&replacement), replacementRange:range];
+            if selection.location >= range.location + range.length {
                 text.setSelectedRange(NSRange::new(selection.location.saturating_add_signed(delta), selection.length));
             }
             if let Some(window) = text.window() { window.makeFirstResponder(Some(&text)); }
@@ -250,6 +251,19 @@ struct EditorState {
     block_marquee: std::cell::Cell<Option<NSRect>>,
     marquee: RefCell<Option<BlockMarquee>>,
     block_drop: std::cell::Cell<Option<NSRect>>,
+    /// What the last finished styling pass saw.
+    rendered: std::cell::Cell<Option<RenderKey>>,
+}
+/// Everything a polling caller can change between two styling passes.
+#[derive(Clone, Copy, PartialEq)]
+struct RenderKey {
+    text: u64,
+    length: usize,
+    selection: (usize, usize),
+    focused: bool,
+    editable: bool,
+    windowed: bool,
+    width: f64,
 }
 define_class!(
     #[unsafe(super(NSTextView, NSText, NSView, NSResponder))]
@@ -1392,11 +1406,42 @@ fn spans(source: &str) -> Vec<Span> {
     }
     result
 }
+thread_local! {
+    /// Byte-to-UTF-16 offsets of the notes being styled, innermost last.
+    static OFFSETS: RefCell<Vec<(*const u8, usize, Vec<u32>)>> = const { RefCell::new(Vec::new()) };
+}
+/// While this lives, `utf16_offset` answers for this exact string from a table
+/// instead of counting from the start of the note on every call.
+struct OffsetTable<'a>(std::marker::PhantomData<&'a str>);
+impl<'a> OffsetTable<'a> {
+    fn new(source: &'a str) -> Self {
+        let mut table = vec![0u32; source.len() + 1];
+        let mut units = 0u32;
+        for (byte, c) in source.char_indices() {
+            table[byte..byte + c.len_utf8()].fill(units);
+            units += c.len_utf16() as u32;
+        }
+        table[source.len()] = units;
+        OFFSETS.with(|tables| tables.borrow_mut().push((source.as_ptr(), source.len(), table)));
+        Self(std::marker::PhantomData)
+    }
+}
+impl Drop for OffsetTable<'_> {
+    fn drop(&mut self) {
+        OFFSETS.with(|tables| { tables.borrow_mut().pop(); });
+    }
+}
+fn utf16_offset(source: &str, byte: usize) -> usize {
+    let known = OFFSETS.with(|tables| {
+        tables.borrow().iter().rev()
+            .find(|(start, length, _)| *start == source.as_ptr() && *length == source.len())
+            .map(|(_, _, table)| table[byte] as usize)
+    });
+    known.unwrap_or_else(|| source[..byte].encode_utf16().count())
+}
 fn utf16_range(source: &str, bytes: Range<usize>) -> NSRange {
-    NSRange::new(
-        source[..bytes.start].encode_utf16().count(),
-        source[bytes].encode_utf16().count(),
-    )
+    let start = utf16_offset(source, bytes.start);
+    NSRange::new(start, utf16_offset(source, bytes.end) - start)
 }
 
 fn byte_for_utf16(source: &str, offset: usize) -> usize {
@@ -1498,11 +1543,19 @@ unsafe fn apply_font_trait(storage: &objc2_foundation::NSMutableAttributedString
         cursor = next;
     }
 }
-unsafe fn conceal(storage: &NSTextStorage, range: NSRange, collapse_lines: bool) {
+/// The font of hidden syntax. Asking AppKit for it again for every hidden
+/// range took a third of a styling pass in the running app.
+fn concealed_font() -> Retained<NSFont> {
+    thread_local! {
+        static FONT: Retained<NSFont> = NSFont::systemFontOfSize(0.01);
+    }
+    FONT.with(Clone::clone)
+}
+unsafe fn conceal(storage: &objc2_foundation::NSMutableAttributedString, range: NSRange, collapse_lines: bool) {
     if range.length == 0 {
         return;
     }
-    storage.addAttribute_value_range(NSFontAttributeName, &NSFont::systemFontOfSize(0.01), range);
+    storage.addAttribute_value_range(NSFontAttributeName, &concealed_font(), range);
     storage.addAttribute_value_range(
         NSForegroundColorAttributeName,
         &NSColor::clearColor(),
@@ -1522,7 +1575,7 @@ unsafe fn conceal(storage: &NSTextStorage, range: NSRange, collapse_lines: bool)
 // A writing line made entirely of hidden syntax still needs the font metrics
 // of its normal text. Keep one transparent glyph at full size and cancel its
 // advance so it does not move the typing position.
-unsafe fn conceal_editable_syntax(storage: &NSTextStorage, source: &str, mut hidden: Vec<Range<usize>>) {
+unsafe fn conceal_editable_syntax(storage: &objc2_foundation::NSMutableAttributedString, source: &str, mut hidden: Vec<Range<usize>>) {
     hidden.sort_unstable_by_key(|range| range.start);
     let mut merged: Vec<Range<usize>> = Vec::new();
     for range in hidden {
@@ -1815,7 +1868,7 @@ fn arrange_rows(
 
 /// Change the paragraph style of each source line while keeping the rest of it.
 unsafe fn adjust_paragraphs(
-    storage: &NSTextStorage,
+    storage: &objc2_foundation::NSMutableAttributedString,
     source: &str,
     bytes: Range<usize>,
     edit: impl Fn(&NSMutableParagraphStyle),
@@ -1854,6 +1907,124 @@ pub unsafe fn style_with_base(text: &NSTextView, base_directory: Option<&Path>) 
     layout_markdown(text, base_directory, None);
 }
 
+/// Style only when the text, selection, focus or width differs from the last
+/// pass. For callers that poll; after any other change call `style_with_base`.
+pub unsafe fn style_if_changed(text: &NSTextView, base_directory: Option<&Path>) {
+    let is_native: bool = msg_send![text, isKindOfClass:MarkdownEditor::class()];
+    if is_native {
+        let native = &*(text as *const NSTextView as *const MarkdownEditor);
+        let source = text.string().to_string();
+        // Without a directory of its own a pass keeps the remembered one.
+        let same_base = base_directory.is_none_or(|base| native.ivars().base_directory.borrow().as_deref() == Some(base));
+        if same_base && native.ivars().rendered.get() == Some(render_key(text, &source)) {
+            return;
+        }
+    }
+    style_with_base(text, base_directory);
+}
+
+unsafe fn editor_focused(text: &NSTextView) -> bool {
+    text.window().is_some_and(|window| {
+        let responder: *mut AnyObject = msg_send![&*window, firstResponder];
+        responder == text as *const NSTextView as *mut AnyObject
+    })
+}
+
+unsafe fn render_key(text: &NSTextView, source: &str) -> RenderKey {
+    let selection: NSRange = msg_send![text, selectedRange];
+    RenderKey {
+        text: fingerprint(source),
+        length: source.len(),
+        selection: (selection.location, selection.length),
+        focused: editor_focused(text),
+        editable: text.isEditable(),
+        windowed: text.window().is_some(),
+        width: text.bounds().size.width,
+    }
+}
+
+/// Copy the styled attributes onto the note, touching only the lines whose
+/// attributes differ. TextKit lays out again whatever a storage edit covers,
+/// even when the values are the same, so an untouched line keeps its layout.
+unsafe fn apply_styles(live: &NSTextStorage, styled: &objc2_foundation::NSMutableAttributedString, source: &str) {
+    if live.length() != styled.length() {
+        return;
+    }
+    let keys = [
+        NSFontAttributeName, NSForegroundColorAttributeName, NSBackgroundColorAttributeName,
+        NSLinkAttributeName, NSUnderlineStyleAttributeName, NSStrikethroughStyleAttributeName,
+        NSParagraphStyleAttributeName, NSKernAttributeName,
+    ];
+    // `wanted` holds the note's text from `shift` on.
+    let matches = |wanted: &objc2_foundation::NSAttributedString, shift: usize, range: NSRange| {
+        let end = range.location + range.length;
+        let mut cursor = range.location;
+        while cursor < end {
+            let (mut wanted_run, mut current_run) = (NSRange::new(0, 0), NSRange::new(0, 0));
+            let wanted: Retained<NSDictionary<NSString, AnyObject>> = msg_send![wanted, attributesAtIndex:cursor - shift, effectiveRange:&mut wanted_run];
+            let current: Retained<NSDictionary<NSString, AnyObject>> = msg_send![live, attributesAtIndex:cursor, effectiveRange:&mut current_run];
+            let same: bool = msg_send![&*wanted, isEqualToDictionary:&*current];
+            // The note may carry attributes this editor does not manage.
+            if !same && !keys.iter().all(|key| match (wanted.objectForKey(key), current.objectForKey(key)) {
+                (None, None) => true,
+                (Some(wanted), Some(current)) => msg_send![&*wanted, isEqual:&*current],
+                _ => false,
+            }) {
+                return false;
+            }
+            cursor = (shift + wanted_run.location + wanted_run.length)
+                .min(current_run.location + current_run.length)
+                .max(cursor + 1);
+        }
+        true
+    };
+    // One editing group per run of changed lines: a group reports a single
+    // range, and two distant lines in it would cover everything between them.
+    let mut editing = false;
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        let range = utf16_range(source, offset..offset + line.len());
+        offset += line.len();
+        let mut same = matches(styled, 0, range);
+        if !same {
+            // The note's storage substitutes fonts for characters its font
+            // lacks, some time after an edit. A line it has already fixed is
+            // unchanged too; what gets applied stays the unfixed style.
+            let fixed: Retained<objc2_foundation::NSMutableAttributedString> =
+                msg_send![&*styled.attributedSubstringFromRange(range), mutableCopy];
+            let _: () = msg_send![&*fixed, fixAttributesInRange:NSRange::new(0, range.length)];
+            same = matches(&fixed, range.location, range);
+        }
+        if same {
+            if std::mem::take(&mut editing) {
+                live.endEditing();
+            }
+            continue;
+        }
+        if !std::mem::replace(&mut editing, true) {
+            live.beginEditing();
+        }
+        for key in [
+            NSBackgroundColorAttributeName, NSLinkAttributeName, NSUnderlineStyleAttributeName,
+            NSStrikethroughStyleAttributeName, NSParagraphStyleAttributeName,
+        ] {
+            live.removeAttribute_range(key, range);
+        }
+        let end = range.location + range.length;
+        let mut cursor = range.location;
+        while cursor < end {
+            let mut run = NSRange::new(0, 0);
+            let wanted: Retained<NSDictionary<NSString, AnyObject>> = msg_send![styled, attributesAtIndex:cursor, effectiveRange:&mut run];
+            let next = (run.location + run.length).min(end).max(cursor + 1);
+            live.addAttributes_range(&wanted, NSRange::new(cursor, next - cursor));
+            cursor = next;
+        }
+    }
+    if editing {
+        live.endEditing();
+    }
+}
+
 /// A drag changes only the presentation. Keep all source ranges anchored to the
 /// original document until mouse-up, including the paragraph after the table.
 unsafe fn layout_markdown(text: &NSTextView, base_directory: Option<&Path>, preview: Option<TableSizePreview>) {
@@ -1884,28 +2055,40 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
         native.ivars().block_cache.borrow_mut().take();
     }
     let source = text.string().to_string();
+    let _offsets = OffsetTable::new(&source);
+    let key = render_key(text, &source);
+    let source_mark = key.text;
     let grid_focus = text.window().and_then(|w| w.firstResponder()).and_then(|r| r.downcast::<InlineTable>().ok()).filter(|v|v.superview().is_some_and(|p|std::ptr::eq(&*p,text as &NSView))).map(|v| {
         (v.ivars().range.get().location,v.cells().iter().filter(|c|c.ivars().selected.get()).map(|c|c.position()).collect::<Vec<_>>())
     });
+    // Tables, checkboxes and code buttons from the last pass are used again
+    // where they still fit; building them costs more than styling the text.
+    let mut old_tables: Vec<Retained<InlineTable>> = Vec::new();
+    let mut old_tasks: std::collections::VecDeque<Retained<TaskCheckbox>> = Default::default();
+    let mut old_languages: Vec<Retained<CodeLanguageButton>> = Vec::new();
+    let mut old_copies: std::collections::VecDeque<Retained<CodeCopyButton>> = Default::default();
     for child in text.subviews() {
+        let child = match child.downcast::<InlineTable>() { Ok(view) => { old_tables.push(view); continue } Err(child) => child };
+        let child = match child.downcast::<TaskCheckbox>() { Ok(view) => { old_tasks.push_back(view); continue } Err(child) => child };
+        let child = match child.downcast::<CodeLanguageButton>() { Ok(view) => { old_languages.push(view); continue } Err(child) => child };
+        let child = match child.downcast::<CodeCopyButton>() { Ok(view) => { old_copies.push_back(view); continue } Err(child) => child };
         let inline: bool = msg_send![&*child, isKindOfClass: InlineImage::class()];
-        let table: bool = msg_send![&*child, isKindOfClass: InlineTable::class()];
-        let task: bool = msg_send![&*child, isKindOfClass: TaskCheckbox::class()];
-        let language: bool = msg_send![&*child, isKindOfClass: CodeLanguageButton::class()];
         let placeholder: bool = msg_send![&*child, isKindOfClass: HeadingPlaceholder::class()];
-        let copy: bool = msg_send![&*child, isKindOfClass: CodeCopyButton::class()];
-        if inline || table || task || language || placeholder || copy {
+        if inline || placeholder {
             child.removeFromSuperview();
         }
     }
-    let Some(storage) = text.textStorage() else {
+    let Some(live) = text.textStorage() else {
         return;
     };
+    // Style a detached copy; only the lines that come out different are
+    // copied onto the note afterwards.
+    let storage = objc2_foundation::NSMutableAttributedString::initWithString(
+        objc2_foundation::NSMutableAttributedString::alloc(),
+        &text.string(),
+    );
     let selection: NSRange = msg_send![text, selectedRange];
-    let focused = text.window().is_some_and(|window| {
-        let responder: *mut AnyObject = msg_send![&*window, firstResponder];
-        responder == text as *const NSTextView as *mut AnyObject
-    });
+    let focused = editor_focused(text);
     let active = if text.isEditable() && focused {
         Some(active_block(&source, selection))
     } else {
@@ -1924,16 +2107,6 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
     let undo: Option<Retained<AnyObject>> = msg_send![text, undoManager];
     if let Some(undo) = &undo {
         let _: () = msg_send![undo, disableUndoRegistration];
-    }
-    storage.beginEditing();
-    for key in [
-        NSBackgroundColorAttributeName,
-        NSLinkAttributeName,
-        NSUnderlineStyleAttributeName,
-        NSStrikethroughStyleAttributeName,
-        NSParagraphStyleAttributeName,
-    ] {
-        storage.removeAttribute_range(key, all);
     }
     storage.addAttribute_value_range(NSFontAttributeName, &base, all);
     let paragraph = NSMutableParagraphStyle::new();
@@ -2150,7 +2323,9 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
         }
         style_anchor(&storage, table.anchor(&source), table.spacing);
     }
-    storage.endEditing();
+    apply_styles(&live, &storage, &source);
+    // Later corrections depend on the laid-out note and go straight to it.
+    let storage = live;
     // Never inherit transparent/tiny attributes from a concealed syntax run.
     let caret = byte_for_utf16(&source, selection.location);
     let typing_font = if let Some((_, _, level)) = heading_at(&source, selection) {
@@ -2194,7 +2369,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             let mut grown = false;
             for side in &sides {
                 let Some(top) = layout_fragment_rect(text, side.anchor) else { continue };
-                let end = source[..side.bytes.end].encode_utf16().count();
+                let end = utf16_offset(&source, side.bytes.end);
                 let bottom = if side.bytes.end < source.len() {
                     layout_fragment_rect(text, end).map(|r| r.origin.y)
                 } else if source.ends_with('\n') {
@@ -2236,7 +2411,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
     };
     if let Some(native) = native {
         for rule in &rules {
-            if let Some(frame) = layout_fragment_rect(text, source[..rule.bytes.start].encode_utf16().count()) {
+            if let Some(frame) = layout_fragment_rect(text, utf16_offset(&source, rule.bytes.start)) {
                 native.ivars().rule_bars.borrow_mut().push(NSRect::new(
                     NSPoint::new(EDITOR_INSET + LINE_PADDING, frame.origin.y + frame.size.height / 2.0),
                     NSSize::new((text.bounds().size.width - 2.0 * (EDITOR_INSET + LINE_PADDING)).max(1.0), 1.0),
@@ -2245,14 +2420,14 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
         }
         for block in &blocks {
             let Some(frame) =
-                layout_fragment_rect(text, source[..block.prefix.start].encode_utf16().count())
+                layout_fragment_rect(text, utf16_offset(&source, block.prefix.start))
             else {
                 continue;
             };
             if let Some(label) = &block.label {
                 let size = if label == "•" { (28.0_f64 - 4.0 * block.list_depth as f64).max(16.0) } else { 16.0 };
                 let width = label.chars().count() as f64 * 9.0;
-                let line_inset = layout_fragment(text, source[..block.prefix.start].encode_utf16().count())
+                let line_inset = layout_fragment(text, utf16_offset(&source, block.prefix.start))
                     .and_then(|fragment| fragment.textLineFragments().firstObject())
                     .map_or(0.0, |line| line.typographicBounds().origin.y);
                 native.ivars().list_labels.borrow_mut().push((
@@ -2309,54 +2484,91 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             if let Some(native) = native {
                 native.ivars().code_panels.borrow_mut().push(panel);
             }
-            let allocated = CodeLanguageButton::alloc(mtm).set_ivars(CodeLanguageState {
-                text: Weak::new(text),
-                range: utf16_range(&source, code.open.clone()),
-                fingerprint: fingerprint(&source),
-                fence: code.fence.clone(),
-                language: code.language.clone(),
-            });
-            let button: Retained<CodeLanguageButton> = msg_send![super(allocated), initWithFrame:NSRect::new(NSPoint::new(panel.origin.x + 12.0, top.origin.y + 4.0), NSSize::new(160.0_f64.min(panel.size.width - 80.0).max(60.0), 28.0)), pullsDown:false];
-            for (id, title) in CODE_LANGUAGES {
-                button.addItemWithTitle(&NSString::from_str(title));
-                if code_highlight::canonical_language(&code.language) == *id {
-                    button.selectItemWithTitle(&NSString::from_str(title));
+            let canonical = code_highlight::canonical_language(&code.language);
+            let listed = CODE_LANGUAGES.iter().find(|(id, _)| canonical == *id).map(|(_, title)| *title);
+            let language_range = utf16_range(&source, code.open.clone());
+            let language_frame = NSRect::new(NSPoint::new(panel.origin.x + 12.0, top.origin.y + 4.0), NSSize::new(160.0_f64.min(panel.size.width - 80.0).max(60.0), 28.0));
+            // A menu already lists what its own language needs.
+            let kept = old_languages.iter().position(|old| old.ivars().language == code.language);
+            let button = match kept {
+                Some(index) => {
+                    let button = old_languages.remove(index);
+                    button.ivars().range.set(language_range);
+                    button.ivars().fingerprint.set(source_mark);
+                    *button.ivars().fence.borrow_mut() = code.fence.clone();
+                    if button.frame() != language_frame {
+                        button.setFrame(language_frame);
+                    }
+                    button
                 }
+                None => {
+                    let allocated = CodeLanguageButton::alloc(mtm).set_ivars(CodeLanguageState {
+                        text: Weak::new(text),
+                        range: std::cell::Cell::new(language_range),
+                        fingerprint: std::cell::Cell::new(source_mark),
+                        fence: RefCell::new(code.fence.clone()),
+                        language: code.language.clone(),
+                    });
+                    let button: Retained<CodeLanguageButton> = msg_send![super(allocated), initWithFrame:language_frame, pullsDown:false];
+                    for (_, title) in CODE_LANGUAGES {
+                        button.addItemWithTitle(&NSString::from_str(title));
+                    }
+                    if listed.is_none() {
+                        button.addItemWithTitle(&NSString::from_str(&code.language));
+                    }
+                    button.setBordered(false);
+                    button.setFont(Some(&crate::font::regular(13.0)));
+                    button.setTarget(Some(&button));
+                    button.setAction(Some(sel!(changeLanguage:)));
+                    text.addSubview(&button);
+                    button
+                }
+            };
+            // A change the editor refused leaves the menu on another item.
+            let title = listed.unwrap_or(&code.language);
+            if button.titleOfSelectedItem().is_none_or(|selected| selected.to_string() != title) {
+                button.selectItemWithTitle(&NSString::from_str(title));
             }
-            if !CODE_LANGUAGES
-                .iter()
-                .any(|(id, _)| code_highlight::canonical_language(&code.language) == *id)
-            {
-                button.addItemWithTitle(&NSString::from_str(&code.language));
-                button.selectItemWithTitle(&NSString::from_str(&code.language));
+            if button.isEnabled() != text.isEditable() {
+                button.setEnabled(text.isEditable());
             }
-            button.setBordered(false);
-            button.setFont(Some(&crate::font::regular(13.0)));
-            button.setEnabled(text.isEditable());
-            button.setTarget(Some(&button));
-            button.setAction(Some(sel!(changeLanguage:)));
-            text.addSubview(&button);
             let content_end = if code.close.is_empty() {
                 code.bytes.end
             } else {
                 code.close.start
             };
             let body = &source[code.open.end..content_end];
-            let allocated = CodeCopyButton::alloc(mtm).set_ivars(CodeCopyState {
-                code: body.strip_suffix('\n').unwrap_or(body).to_string(),
-            });
-            let copy: Retained<CodeCopyButton> = msg_send![super(allocated), initWithFrame:NSRect::new(NSPoint::new(panel.origin.x + panel.size.width - 64.0, top.origin.y + 6.0), NSSize::new(52.0, 24.0))];
-            copy.setTitle(&NSString::from_str("복사"));
-            copy.setBordered(false);
-            copy.setFont(Some(&crate::font::regular(12.0)));
-            copy.setTarget(Some(&copy));
-            copy.setAction(Some(sel!(copyCode:)));
-            text.addSubview(&copy);
+            let body = body.strip_suffix('\n').unwrap_or(body);
+            let copy_frame = NSRect::new(NSPoint::new(panel.origin.x + panel.size.width - 64.0, top.origin.y + 6.0), NSSize::new(52.0, 24.0));
+            match old_copies.pop_front() {
+                Some(copy) => {
+                    if *copy.ivars().code.borrow() != body {
+                        *copy.ivars().code.borrow_mut() = body.to_string();
+                    }
+                    if copy.frame() != copy_frame {
+                        copy.setFrame(copy_frame);
+                    }
+                    // Styling again has always put "복사됨" back to "복사".
+                    if copy.title().to_string() != "복사" {
+                        copy.setTitle(&NSString::from_str("복사"));
+                    }
+                }
+                None => {
+                    let allocated = CodeCopyButton::alloc(mtm).set_ivars(CodeCopyState { code: RefCell::new(body.to_string()) });
+                    let copy: Retained<CodeCopyButton> = msg_send![super(allocated), initWithFrame:copy_frame];
+                    copy.setTitle(&NSString::from_str("복사"));
+                    copy.setBordered(false);
+                    copy.setFont(Some(&crate::font::regular(12.0)));
+                    copy.setTarget(Some(&copy));
+                    copy.setAction(Some(sel!(copyCode:)));
+                    text.addSubview(&copy);
+                }
+            }
             let mut offset = code.open.end;
             for (number, line) in body.split_inclusive('\n').enumerate() {
                 if let (Some(native), Some(frame)) = (
                     native,
-                    layout_fragment_rect(text, source[..offset].encode_utf16().count()),
+                    layout_fragment_rect(text, utf16_offset(&source, offset)),
                 ) {
                     native.ivars().line_numbers.borrow_mut().push((
                         (number + 1).to_string(),
@@ -2394,11 +2606,11 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             let Event::TaskListMarker(checked) = event else {
                 continue;
             };
+            let byte = bytes.start;
             let range = utf16_range(&source, bytes);
             let Some(local) = layout_fragment_rect(text, range.location) else {
                 continue;
             };
-            let byte = byte_for_utf16(&source, range.location);
             let indent = blocks
                 .iter()
                 .find(|b| b.bytes.start <= byte && byte < b.bytes.end)
@@ -2410,19 +2622,37 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 ),
                 NSSize::new(18.0, 18.0),
             );
-            let allocated = TaskCheckbox::alloc(mtm).set_ivars(CheckboxState {
-                text: Weak::new(text),
-                range,
-                fingerprint: fingerprint(&source),
-            });
-            let checkbox: Retained<TaskCheckbox> = msg_send![super(allocated),initWithFrame:frame];
-            checkbox.setTitle(&NSString::from_str(""));
-            checkbox.setButtonType(NSButtonType::Switch);
-            checkbox.setState(if checked { 1 } else { 0 });
-            checkbox.setEnabled(text.isEditable());
-            checkbox.setTarget(Some(&checkbox));
-            checkbox.setAction(Some(sel!(toggle:)));
-            text.addSubview(&checkbox);
+            let checkbox = match old_tasks.pop_front() {
+                Some(checkbox) => {
+                    checkbox.ivars().range.set(range);
+                    checkbox.ivars().fingerprint.set(source_mark);
+                    if checkbox.frame() != frame {
+                        checkbox.setFrame(frame);
+                    }
+                    checkbox
+                }
+                None => {
+                    let allocated = TaskCheckbox::alloc(mtm).set_ivars(CheckboxState {
+                        text: Weak::new(text),
+                        range: std::cell::Cell::new(range),
+                        fingerprint: std::cell::Cell::new(source_mark),
+                    });
+                    let checkbox: Retained<TaskCheckbox> = msg_send![super(allocated),initWithFrame:frame];
+                    checkbox.setTitle(&NSString::from_str(""));
+                    checkbox.setButtonType(NSButtonType::Switch);
+                    checkbox.setTarget(Some(&checkbox));
+                    checkbox.setAction(Some(sel!(toggle:)));
+                    text.addSubview(&checkbox);
+                    checkbox
+                }
+            };
+            let state = if checked { 1 } else { 0 };
+            if checkbox.state() != state {
+                checkbox.setState(state);
+            }
+            if checkbox.isEnabled() != text.isEditable() {
+                checkbox.setEnabled(text.isEditable());
+            }
         }
         let mut reach: f64 = 0.0;
         for table in tables {
@@ -2436,10 +2666,44 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 NSPoint::new(EDITOR_INSET + table.x, local.origin.y + TABLE_TOP_PADDING),
                 NSSize::new(width, table.height() + handle_room),
             );
+            let table_range = utf16_range(&source, table.bytes.clone());
+            let built_from = table.built_from(&source, handle_room, text.isEditable());
+            // A drag preview shows sizes the source does not have, and a cell
+            // that was opened for editing still shows its Markdown.
+            let kept = old_tables.iter().enumerate()
+                .filter(|(_, old)| {
+                    preview.is_none()
+                        && old.ivars().built_from == built_from
+                        && old.ivars().base_directory.as_deref() == base_directory
+                        && !old.cells().iter().any(|cell| cell.ivars().needs_layout.get())
+                })
+                .min_by_key(|(_, old)| old.ivars().range.get().location.abs_diff(table_range.location))
+                .map(|(index, _)| index);
+            if let Some(view) = kept.map(|index| old_tables.swap_remove(index)) {
+                view.ivars().range.set(table_range);
+                if view.frame().origin != frame.origin {
+                    view.setFrameOrigin(frame.origin);
+                }
+                for cell in view.cells() {
+                    let (row, column) = cell.position();
+                    cell.ivars().range.set(utf16_range(&source, table.cell_ranges[row][column].clone()));
+                    cell.ivars().fingerprint.set(source_mark);
+                }
+                // As when it was built again: only the grid that holds the
+                // keyboard keeps its selected cells.
+                let holds_keyboard = view.window().and_then(|w| w.firstResponder())
+                    .is_some_and(|r| std::ptr::eq(Retained::as_ptr(&r) as *const AnyObject, Retained::as_ptr(&view) as *const AnyObject));
+                if !holds_keyboard {
+                    view.clear_selection();
+                }
+                reach = reach.max(frame.origin.y + frame.size.height);
+                continue;
+            }
             let allocated = InlineTable::alloc(mtm).set_ivars(InlineTableState {
                 text: Weak::new(text),
-                range: std::cell::Cell::new(utf16_range(&source, table.bytes.clone())),
+                range: std::cell::Cell::new(table_range),
                 base_directory: base_directory.map(Path::to_path_buf),
+                built_from,
             });
             let view: Retained<InlineTable> = msg_send![super(allocated),initWithFrame:frame];
             if text.isEditable() {
@@ -2456,7 +2720,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                     let allocated = TableCell::alloc(mtm).set_ivars(TableCellState {
                         text: Weak::new(text),
                         range: std::cell::Cell::new(utf16_range(&source, cell_range.clone())),
-                        fingerprint: std::cell::Cell::new(fingerprint(&source)),
+                        fingerprint: std::cell::Cell::new(source_mark),
                         row: row_index, column, selected: Default::default(),
                         original_display: RefCell::new(contents.clone()),
                         editing_markdown: Default::default(),
@@ -2529,7 +2793,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 limit: spec.limit,
                 base: base_directory.map(Path::to_path_buf),
                 link: spec.link,
-                fingerprint: fingerprint(&source),
+                fingerprint: source_mark,
                 targets: Default::default(),
                 preview: Default::default(),
                 drag: std::cell::Cell::new(None),
@@ -2555,9 +2819,15 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             text.setFrameSize(size);
         }
     }
+    for view in old_tables { view.removeFromSuperview(); }
+    for view in old_tasks { view.removeFromSuperview(); }
+    for view in old_languages { view.removeFromSuperview(); }
+    for view in old_copies { view.removeFromSuperview(); }
     if let Some(native) = native {
         *native.ivars().sides.borrow_mut() = sides;
         native.refresh_blocks();
+        // A drag preview shows sizes the source does not have yet.
+        native.ivars().rendered.set(preview.is_none().then_some(key));
     }
 }
 
@@ -2595,8 +2865,8 @@ unsafe fn enter_source(state: &BlockPreviewState) {
 }
 struct CheckboxState {
     text: Weak<NSTextView>,
-    range: NSRange,
-    fingerprint: u64,
+    range: std::cell::Cell<NSRange>,
+    fingerprint: std::cell::Cell<u64>,
 }
 fn fingerprint(source: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -2618,10 +2888,10 @@ define_class!(
             let marked:bool=msg_send![&*text,hasMarkedText];
             if marked {return;}
             let source=text.string().to_string();
-            if fingerprint(&source)!=self.ivars().fingerprint {return;}
+            if fingerprint(&source)!=self.ivars().fingerprint.get() {return;}
             let selection=text.selectedRanges();
             let replacement=NSString::from_str(if self.state()==1 {"[x]"}else{"[ ]"});
-            let _:()=msg_send![&*text,insertText:&*replacement,replacementRange:self.ivars().range];
+            let _:()=msg_send![&*text,insertText:&*replacement,replacementRange:self.ivars().range.get()];
             text.setSelectedRanges(&selection);
         }}
     }
@@ -2888,6 +3158,8 @@ struct InlineTableState {
     text: Weak<NSTextView>,
     range: std::cell::Cell<NSRange>,
     base_directory: Option<PathBuf>,
+    /// What this grid was built from; see `InlineTableSpec::built_from`.
+    built_from: u64,
 }
 define_class!(
     #[unsafe(super = NSView)]
@@ -2958,6 +3230,16 @@ impl InlineTableSpec {
         }
     }
 
+    /// Everything a grid's views depend on apart from where the grid sits.
+    /// A grid built from the same values is the same grid.
+    fn built_from(&self, source: &str, handle_room: f64, editable: bool) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut state = std::collections::hash_map::DefaultHasher::new();
+        source[self.bytes.clone()].hash(&mut state);
+        (self.limit.to_bits(), handle_room.to_bits(), editable).hash(&mut state);
+        state.finish()
+    }
+
     /// The space a table and its controls take below the anchor line.
     fn reserve(&self, handle_room: f64) -> f64 {
         self.height() + TABLE_TOP_PADDING + handle_room + if handle_room > 0.0 { 2.0 } else { 6.0 }
@@ -2990,7 +3272,7 @@ const COLUMN_GAP: f64 = 24.0;
 const MIN_COLUMN_WIDTH: f64 = 160.0;
 
 /// An attachment hangs below a collapsed anchor line that reserves its room.
-unsafe fn style_anchor(storage: &NSTextStorage, range: NSRange, spacing: f64) {
+unsafe fn style_anchor(storage: &objc2_foundation::NSMutableAttributedString, range: NSRange, spacing: f64) {
     let paragraph = NSMutableParagraphStyle::new();
     paragraph.setMinimumLineHeight(0.01);
     paragraph.setMaximumLineHeight(0.01);

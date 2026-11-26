@@ -114,6 +114,14 @@ impl InlineTable {
         }
     }
 }
+impl InlineTable {
+    /// Every cell goes back to its resting color.
+    fn clear_selection(&self) {
+        if self.cells().iter().any(|cell| cell.ivars().selected.get()) {
+            self.select((usize::MAX, usize::MAX), (usize::MAX, usize::MAX));
+        }
+    }
+}
 impl TableCell {
     fn position(&self) -> (usize, usize) {
         (self.ivars().row, self.ivars().column)

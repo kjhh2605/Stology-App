@@ -2389,7 +2389,8 @@ impl State {
             self.last_text = current;
             self.dirty = true;
             self.edited_at = Instant::now();
-            editor::style_with_base(&self.text, self.document.as_ref().and_then(document_base));
+            // Typing has already styled this text; only an edit made elsewhere needs it.
+            editor::style_if_changed(&self.text, self.document.as_ref().and_then(document_base));
             self.set_status("작성 중…");
             self.update_header();
         }
@@ -5208,15 +5209,17 @@ impl State {
                 .as_ref()
                 .map(|r| Retained::as_ptr(r) == Retained::as_ptr(&self.text) as *const AnyObject)
                 .unwrap_or(false);
-            if !marked
-                && (selection != self.last_selection
-                    || focused != self.last_editor_focus
-                    || (!editor::table_cell_is_editing(&self.text)
-                        && editor::table_cells_need_layout(&self.text)))
-            {
+            let cells = !editor::table_cell_is_editing(&self.text)
+                && editor::table_cells_need_layout(&self.text);
+            if !marked && (selection != self.last_selection || focused != self.last_editor_focus || cells) {
                 self.last_selection = selection;
                 self.last_editor_focus = focused;
-                editor::style_with_base(&self.text, self.document.as_ref().and_then(document_base));
+                let base = self.document.as_ref().and_then(document_base);
+                if cells {
+                    editor::style_with_base(&self.text, base);
+                } else {
+                    editor::style_if_changed(&self.text, base);
+                }
             }
         }
         if self.dirty
