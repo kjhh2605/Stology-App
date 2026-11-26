@@ -11,7 +11,7 @@ use objc2_foundation::*;
 use serde_json::Value;
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
 };
 
@@ -71,6 +71,75 @@ pub struct TreeState {
     rename: RefCell<Option<RenameSession>>,
     visible_paths: RefCell<Option<HashSet<String>>>,
     analysis_busy: Cell<bool>,
+    marks: AnalysisMarks,
+}
+/// Per-file analysis status for the materials tree. Failures last only while the app runs.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct AnalysisMarks {
+    pub running: Option<String>,
+    pub failed: HashMap<String, String>,
+}
+#[derive(PartialEq, Debug)]
+enum Mark {
+    Running,
+    Done,
+    Stale,
+    Failed(String),
+}
+impl Mark {
+    fn describe(&self) -> String {
+        match self {
+            Mark::Running => "분석 중".into(),
+            Mark::Done => "분석 완료".into(),
+            Mark::Stale => "문서가 바뀌어 다시 분석이 필요해요".into(),
+            Mark::Failed(reason) if reason.is_empty() => "분석 실패".into(),
+            Mark::Failed(reason) => format!("분석 실패 · {reason}"),
+        }
+    }
+}
+/// The running job wins over a recorded failure, which wins over the stored state.
+fn analysis_mark(document: &Value, marks: &AnalysisMarks) -> Option<Mark> {
+    if !supports_analysis(document) {
+        return None;
+    }
+    let id = document["id"].as_str()?;
+    if marks.running.as_deref() == Some(id) {
+        return Some(Mark::Running);
+    }
+    if let Some(reason) = marks.failed.get(id) {
+        return Some(Mark::Failed(reason.clone()));
+    }
+    match document["analysis_state"].as_str() {
+        Some("analysed") => Some(Mark::Done),
+        Some("stale") => Some(Mark::Stale),
+        _ => None,
+    }
+}
+/// Sits in the empty disclosure gutter left of the file icon, centred on the icon.
+unsafe fn analysis_indicator(mark: &Mark) -> Retained<NSView> {
+    let view: Retained<NSView> = if *mark == Mark::Running {
+        let spinner = NSProgressIndicator::initWithFrame(NSProgressIndicator::alloc(mtm()), rect(-14., 13., 12., 12.));
+        spinner.setStyle(NSProgressIndicatorStyle::Spinning);
+        spinner.setControlSize(NSControlSize::Mini);
+        spinner.startAnimation(None);
+        spinner.into_super()
+    } else {
+        let dot = NSView::initWithFrame(NSView::alloc(mtm()), rect(-12., 15., 8., 8.));
+        dot.setWantsLayer(true);
+        let color = match mark {
+            // Dark enough to read on the selected row's lavender wash without changing colour.
+            Mark::Done => theme::color(0.52, 0.45, 0.92, 1.),
+            Mark::Stale => NSColor::systemOrangeColor(),
+            _ => NSColor::systemRedColor(),
+        };
+        if let Some(layer) = dot.layer() {
+            let _: () = msg_send![&layer, setBackgroundColor: &*color.CGColor()];
+            let _: () = msg_send![&layer, setCornerRadius: 4.0f64];
+        }
+        dot
+    };
+    view.setToolTip(Some(&NSString::from_str(&mark.describe())));
+    view
 }
 fn supports_analysis(document: &Value) -> bool {
     matches!(
@@ -450,6 +519,13 @@ define_class!(
             cell.addSubview(&label);
             cell.setTextField(Some(&label));
             if let Some(badge) = badge { cell.addSubview(&badge); }
+            let mark = n.document.as_ref().and_then(|d| analysis_mark(d, &self.ivars().marks));
+            if let Some(mark) = &mark {
+                if cell.respondsToSelector(sel!(setClipsToBounds:)) {
+                    let _: () = msg_send![&cell, setClipsToBounds: false];
+                }
+                cell.addSubview(&analysis_indicator(mark));
+            }
             let symbol = if n.folder() {
                 if outline.isItemExpanded(Some(item)) { "folder-open" } else { "folder" }
             } else { theme::file_type_symbol(extension.as_deref().unwrap_or("")) };
@@ -462,7 +538,8 @@ define_class!(
                 cell.setImageView(Some(&icon));
             }
             let _: () = msg_send![&cell, setAccessibilityLabel: &*NSString::from_str(&title)];
-            let _: () = msg_send![&cell, setAccessibilityValue: &*NSString::from_str(if active { "현재 문서" } else { "" })];
+            let value = [active.then(|| "현재 문서".to_owned()), mark.as_ref().map(Mark::describe)].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            let _: () = msg_send![&cell, setAccessibilityValue: &*NSString::from_str(&value)];
             cell.setNeedsLayout(true);
             cell.layoutSubtreeIfNeeded();
             Some(cell.into_super().into_super())
@@ -1118,6 +1195,7 @@ pub unsafe fn build(
     tree: &Value,
     selected_id: Option<&str>,
     open_folders: &HashSet<String>,
+    marks: &AnalysisMarks,
     frame: NSRect,
 ) -> (Retained<NSScrollView>, Retained<DocumentTree>) {
     let native: Retained<DocumentOutline> = msg_send![super(DocumentOutline::alloc(mtm()).set_ivars(Cell::new(None))), initWithFrame: rect(0., 0., frame.size.width, frame.size.height)];
@@ -1200,7 +1278,8 @@ pub unsafe fn build(
             active_document: RefCell::new(None),
             rename: RefCell::new(None),
             visible_paths: RefCell::new(None),
-            analysis_busy: Cell::new(false)
+            analysis_busy: Cell::new(false),
+            marks: marks.clone(),
         })),
         init
     ];
@@ -1270,6 +1349,23 @@ mod tests {
         }
         assert!(!analysis_enabled(&json!({"kind":"draft"}), false));
         assert!(!analysis_enabled(&json!({"kind":"ppt"}), false));
+    }
+
+    #[test]
+    fn analysis_mark_prefers_running_then_failure_then_stored_state() {
+        let mut marks = AnalysisMarks::default();
+        let mut document = json!({"id":"a","kind":"pdf","analysis_state":"unanalysed"});
+        assert_eq!(analysis_mark(&document, &marks), None);
+        document["analysis_state"] = json!("analysed");
+        assert_eq!(analysis_mark(&document, &marks), Some(Mark::Done));
+        document["analysis_state"] = json!("stale");
+        assert_eq!(analysis_mark(&document, &marks), Some(Mark::Stale));
+        marks.failed.insert("a".into(), "로그인이 필요합니다".into());
+        assert_eq!(analysis_mark(&document, &marks), Some(Mark::Failed("로그인이 필요합니다".into())));
+        assert_eq!(Mark::Failed("로그인이 필요합니다".into()).describe(), "분석 실패 · 로그인이 필요합니다");
+        marks.running = Some("a".into());
+        assert_eq!(analysis_mark(&document, &marks), Some(Mark::Running));
+        assert_eq!(analysis_mark(&json!({"id":"a","kind":"draft","analysis_state":"analysed"}), &marks), None);
     }
 }
 

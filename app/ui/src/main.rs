@@ -440,6 +440,11 @@ struct State {
     annotation_conversion: Option<(pptx_preview::Handle, Value, bool)>,
     annotation_publish: Option<mpsc::Receiver<Result<Value, String>>>,
     analysis_waiting: Option<Value>,
+    /// 파일별 분석 대상. 시작 전 저장·추출 단계부터 자료 트리에 진행 표시를 한다.
+    analysis_target: Option<String>,
+    /// 이번 실행 중 실패·중단한 자료와 이유. 앱을 다시 열면 비운다.
+    analysis_failures: std::collections::HashMap<String, String>,
+    tree_marks: document_tree::AnalysisMarks,
     deferred_tree: Option<document_tree::Event>,
     deferred_action: Option<Action>,
     last_pdf_status: String,
@@ -1096,7 +1101,7 @@ impl State {
         self.ai_spinner.setFrameOrigin(NSPoint::new(26., y + 4.));
     }
     unsafe fn update_ai_spinner(&self) {
-        let active = self.workspace.is_some() && (self.chat.busy() || self.job.is_some()
+        let active = self.workspace.is_some() && (self.chat.busy() || (self.job.is_some() && !self.single_analysis())
             || self.cleanup_review.is_some()
             || (self.suggestions_for == self.workspace && self.suggestions["running"].as_i64().unwrap_or(0) > 0));
         if active == self.ai_spinner.isHidden() {
@@ -1852,10 +1857,12 @@ impl State {
             let area_h = (h * 0.53).max(180.);
             let strip_h = self.render_organize_strip(&tree, &heading, h - 104., w);
             let selected = self.document.as_ref().and_then(|d| d["id"].as_str());
+            self.tree_marks = self.analysis_marks();
             let (scroll, controller) = document_tree::build(
                 &tree,
                 selected,
                 &self.open_folders,
+                &self.tree_marks,
                 rect(10., h - 104. - area_h, w - 20., (area_h - strip_h).max(60.)),
             );
             controller.set_analysis_busy(self.analysis_busy());
@@ -3552,18 +3559,75 @@ impl State {
             self.set_status("현재 파일의 분석이 완료되어 있습니다");
             return;
         }
-        if self.provider.is_empty() {
-            self.connect();
-            if self.provider.is_empty() {
-                return;
-            }
+        if !self.analysis_ready() {
+            return;
         }
-        if !confirm_action("자료 분석", &format!("‘{}’의 원문과 이미지가 {} 공급자에게 전송됩니다. 필기를 PDF에 저장한 뒤 현재 파일을 분석합니다.", strv(&current,"title"), self.provider), "분석 시작") { return; }
         pdf_session::request_flush_all();
+        let id = strv(&current, "id");
+        self.analysis_failures.remove(&id);
+        self.analysis_target = Some(id);
         self.analysis_waiting = Some(current);
-        self.set_status("최신 필기 저장 후 분석을 시작합니다…");
+        self.set_status("");
         self.refresh_right();
         self.start_waiting_analysis();
+    }
+    /// 시작할 수 없는 분석은 경고 창으로 알린다. 연결 상태를 아직 확인 중이면 그대로 시작한다.
+    unsafe fn analysis_ready(&mut self) -> bool {
+        let (cli, plan) = match self.provider.as_str() {
+            "antigravity" => ("Antigravity CLI", "Google 계정"),
+            "claude" => ("Claude Code CLI", "Claude 구독"),
+            _ => ("Codex CLI", "ChatGPT 구독"),
+        };
+        let entry = self.provider_info.as_ref().and_then(|v| {
+            v["providers"].as_array()?.iter().find(|p| p["provider"] == self.provider.as_str()).cloned()
+        });
+        let problem = match entry {
+            _ if self.provider.is_empty() => "분석에 쓸 구독 계정이 연결되어 있지 않아요.".to_owned(),
+            Some(p) if p["installed"] != true => format!("{cli}가 설치되어 있지 않아요."),
+            Some(p) if p["logged_in"] != true => format!("{plan} 로그인이 필요해요."),
+            _ => return true,
+        };
+        if confirm_action("분석을 시작할 수 없어요", &format!("{problem} 구독 연결을 마친 뒤 다시 분석해 주세요."), "연결하기") {
+            self.connect();
+        }
+        false
+    }
+    /// 파일별 분석이 진행 중인지. 이때는 보조 텍스트 대신 자료 트리에 진행을 표시한다.
+    fn single_analysis(&self) -> bool {
+        self.analysis_target.is_some()
+            || (self.job.is_some() && self.run.as_ref().is_some_and(|r| r["single"] == true && r["state"] == "running"))
+    }
+    /// 자료 트리의 분석 상태 표시. 과목 정리에서는 지금 읽는 자료에 진행 표시를 한다.
+    fn analysis_marks(&self) -> document_tree::AnalysisMarks {
+        let from_run = self
+            .run
+            .as_ref()
+            .filter(|r| self.job.is_some() && r["state"] == "running" && self.workspace.as_deref() == r["workspace_id"].as_str())
+            .and_then(|r| {
+                let materials = r["materials"].as_array()?;
+                if r["single"] == true { materials.first() } else { materials.iter().find(|m| m["state"] == "pending") }
+            })
+            .and_then(|m| m["id"].as_str())
+            .map(str::to_owned);
+        document_tree::AnalysisMarks {
+            running: self.analysis_target.clone().or(from_run),
+            failed: self.analysis_failures.clone(),
+        }
+    }
+    /// 끝난 실행의 자료별 결과를 실패 표시에 옮긴다.
+    fn record_run_failures(&mut self, run: &Value) {
+        for m in run["materials"].as_array().into_iter().flatten() {
+            let Some(id) = m["id"].as_str() else { continue };
+            match m["state"].as_str() {
+                Some("failed") => {
+                    self.analysis_failures.insert(id.to_owned(), strv(m, "reason"));
+                }
+                Some("done") => {
+                    self.analysis_failures.remove(id);
+                }
+                _ => {}
+            }
+        }
     }
     unsafe fn start_waiting_analysis(&mut self) {
         if self.analysis_waiting.is_none() {
@@ -3573,7 +3637,8 @@ impl State {
             Ok(false) => return,
             Err(e) => {
                 self.analysis_waiting = None;
-                self.fail(&format!("PDF 저장 실패로 분석을 시작하지 않았습니다: {e}"));
+                self.analysis_target = None;
+                alert("분석을 시작할 수 없어요", &format!("필기를 PDF에 저장하지 못해 분석을 시작하지 않았어요. {e}"));
                 self.refresh_right();
                 return;
             }
@@ -3583,9 +3648,11 @@ impl State {
         match rpc(json!({"op":"note.read","id":doc["id"]})) {
             Ok(current) => {
                 self.begin_async(json!({"op":"analysis.begin","workspace_id":current["workspace_id"],"material_id":current["id"],"expected_hash":current["hash"],"provider":self.provider}));
-                self.set_status("자료 추출 중… · 필기와 편집을 계속할 수 있습니다");
             }
-            Err(e) => self.fail(&e),
+            Err(e) => {
+                self.analysis_target = None;
+                alert("분석을 시작할 수 없어요", &e);
+            }
         }
         self.refresh_right();
     }
@@ -4865,17 +4932,28 @@ impl State {
             Action::Connect => self.connect(),
             Action::Import => self.import(),
             Action::Cancel => {
+                let single = self.single_analysis();
+                let target = self.analysis_marks().running.filter(|_| single);
                 if let Some(p) = self.pending.take() {
                     p.cancel();
-                    self.set_status("자료 추출 취소됨 · 원본 보관됨");
+                    if let Some(id) = &target {
+                        self.analysis_target = None;
+                        self.analysis_failures.insert(id.clone(), "분석을 중단했어요".into());
+                    } else {
+                        self.set_status("자료 추출 취소됨 · 원본 보관됨");
+                    }
                     self.refresh_right();
                 }
                 if let Some(job) = self.job.clone() {
                     match rpc(json!({"op":"analysis.cancel","id":job})) {
                         Ok(_) => {
                             self.job = None;
-                            self.refresh_right();
-                            self.set_status("분석 취소됨 · 원본과 기존 지도는 보존됩니다");
+                            if let Some(id) = &target {
+                                self.analysis_target = None;
+                                self.analysis_failures.insert(id.clone(), "분석을 중단했어요".into());
+                            } else {
+                                self.set_status("분석 취소됨 · 원본과 기존 지도는 보존됩니다");
+                            }
                             self.refresh_right();
                         }
                         Err(e) => self.fail(&e),
@@ -5093,11 +5171,11 @@ impl State {
             match result {
                 Ok(j) => {
                     self.job = j["id"].as_str().map(str::to_string);
-                    self.set_status("분석 중…");
                     self.refresh_right();
                 }
                 Err(e) => {
-                    self.fail(&format!("원본은 보관되었습니다. 분석 시작 실패: {e}"));
+                    self.analysis_target = None;
+                    alert("분석을 시작할 수 없어요", &format!("{e}\n원본은 그대로 보관되어 있어요."));
                     self.refresh_right();
                 }
             }
@@ -5228,15 +5306,32 @@ impl State {
                         self.load_run();
                     }
                     let run = self.run.clone().filter(|_| here).unwrap_or(Value::Null);
-                    let single = run["single"] == true;
+                    let single = run["single"] == true || self.analysis_target.is_some();
                     if ["succeeded", "failed", "cancelled"].contains(&state) {
                         self.job = None;
+                        let target = self.analysis_target.take().or_else(|| {
+                            run["materials"][0]["id"].as_str().filter(|_| single).map(str::to_owned)
+                        });
+                        self.record_run_failures(&run);
                         match state {
-                            "succeeded" => self.set_status(j["result"]["text"].as_str().unwrap_or("정리 완료")),
-                            "failed" if single => alert(
-                                "분석 실패 · 원본은 보관됨",
-                                j["error"].as_str().unwrap_or("분석 결과를 확인할 수 없습니다."),
-                            ),
+                            "succeeded" => {
+                                if let Some(id) = &target {
+                                    self.analysis_failures.remove(id);
+                                }
+                                self.set_status(j["result"]["text"].as_str().unwrap_or("정리 완료"));
+                            }
+                            // 진행 중 실패·중단은 자료 트리의 빨간 원과 툴팁으로 알린다.
+                            "failed" if single => {
+                                if let Some(id) = target {
+                                    let reason = j["error"].as_str().unwrap_or("분석 결과를 확인할 수 없어요").to_owned();
+                                    self.analysis_failures.insert(id, reason);
+                                }
+                            }
+                            "cancelled" if single => {
+                                if let Some(id) = target {
+                                    self.analysis_failures.insert(id, "분석을 중단했어요".into());
+                                }
+                            }
                             "failed" if run["state"] == "limit" => self.set_status("구독 사용 한도에 닿아 멈췄어요 · 이전 지도는 그대로예요"),
                             "failed" => self.set_status("정리를 마치지 못했어요 · 이전 지도는 그대로예요"),
                             _ => self.set_status("멈췄어요 · 원본과 기존 지도는 보존됩니다"),
@@ -5245,9 +5340,11 @@ impl State {
                         self.refresh_right();
                     } else {
                         let label = strv(&run["progress"], "label");
-                        if !here {
+                        if single {
+                            // 파일별 분석의 진행은 자료 트리의 스피너로만 표시한다.
+                        } else if !here {
                             self.set_status("다른 과목을 정리하는 중…");
-                        } else if single || label.is_empty() {
+                        } else if label.is_empty() {
                             self.set_status("자료 분석 중… · 필기와 편집을 계속할 수 있습니다");
                         } else {
                             self.set_status(&label);
@@ -5258,6 +5355,9 @@ impl State {
                     }
                 }
             }
+        }
+        if self.map.is_none() && self.workspace.is_some() && self.analysis_marks() != self.tree_marks {
+            self.refresh_right();
         }
         self.update_analysis_help();
         let size = self.root.frame().size;
@@ -5795,6 +5895,9 @@ fn main() {
             annotation_conversion: None,
             annotation_publish: None,
             analysis_waiting: None,
+            analysis_target: None,
+            analysis_failures: Default::default(),
+            tree_marks: Default::default(),
             deferred_tree: None,
             deferred_action: None,
             last_pdf_status: String::new(),

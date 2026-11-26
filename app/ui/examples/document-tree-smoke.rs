@@ -80,7 +80,7 @@ fn main() {
             {"id":"heic","title":"Camera image","path":"camera.heic","kind":"heic"}
         ]});
         let (scroll, controller) =
-            document_tree::build(&tree, Some("b"), &HashSet::new(), rect(0., 0., 300., 500.));
+            document_tree::build(&tree, Some("b"), &HashSet::new(), &Default::default(), rect(0., 0., 300., 500.));
         let outline: Retained<NSOutlineView> =
             Retained::cast_unchecked(scroll.documentView().unwrap());
         assert!(
@@ -390,7 +390,7 @@ fn main() {
             "missing source rejected"
         );
         let (_, foreign) =
-            document_tree::build(&tree, None, &HashSet::new(), rect(0., 0., 300., 500.));
+            document_tree::build(&tree, None, &HashSet::new(), &Default::default(), rect(0., 0., 300., 500.));
         // A controller from another outline may know the same ID but must reject the foreign source.
         let foreign_source: &ProtocolObject<dyn NSOutlineViewDataSource> =
             ProtocolObject::from_ref(&*foreign);

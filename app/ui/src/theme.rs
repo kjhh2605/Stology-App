@@ -16,7 +16,7 @@ use objc2_foundation::{
 fn mtm() -> MainThreadMarker {
     MainThreadMarker::new().expect("theme requires main thread")
 }
-fn color(r: f64, g: f64, b: f64, a: f64) -> Retained<NSColor> {
+pub(crate) fn color(r: f64, g: f64, b: f64, a: f64) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a)
 }
 pub unsafe fn layer(view: &NSView) -> Retained<AnyObject> {
