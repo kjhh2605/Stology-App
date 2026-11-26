@@ -1,7 +1,9 @@
 // Block handle, block selection and block moves. A block is one line of the
 // note, or a whole code block, table or image; see note_blocks.rs.
 
-const BLOCK_HANDLE_SIZE: NSSize = NSSize::new(16.0, 22.0);
+const BLOCK_HANDLE_SIZE: NSSize = NSSize::new(12.0, 22.0);
+/// Space between the handle and its block. The margin left of the handle stays free for block marquee drags.
+const BLOCK_HANDLE_GAP: f64 = 1.0;
 
 struct BlockHandleState {
     text: Weak<NSTextView>,
@@ -30,6 +32,8 @@ struct BlockMarquee {
     note: Vec<note_blocks::Block>,
     boxes: Vec<Option<BlockBox>>,
     dragged: bool,
+    /// Blocks already selected when a Shift drag began; the drag adds to them.
+    base: Vec<Range<usize>>,
 }
 define_class!(
     #[unsafe(super = NSView)]
@@ -52,7 +56,7 @@ define_class!(
             for row in 0..3 {
                 for column in 0..2 {
                     let dot = NSRect::new(
-                        NSPoint::new(4.0 + column as f64 * 5.0, 4.5 + row as f64 * 5.0),
+                        NSPoint::new(2.0 + column as f64 * 5.0, 4.5 + row as f64 * 5.0),
                         NSSize::new(3.0, 3.0),
                     );
                     NSBezierPath::bezierPathWithOvalInRect(dot).fill();
@@ -194,7 +198,7 @@ impl MarkdownEditor {
     unsafe fn place_block_handle(&self, handle: &BlockHandle, block: usize, outline: BlockBox) {
         handle.ivars().block.set(block);
         handle.setFrameOrigin(NSPoint::new(
-            (outline.rect.origin.x - BLOCK_HANDLE_SIZE.width - 3.0).max(2.0),
+            (outline.rect.origin.x - BLOCK_HANDLE_SIZE.width - BLOCK_HANDLE_GAP).max(2.0),
             outline.rect.origin.y + (outline.line - BLOCK_HANDLE_SIZE.height) / 2.0,
         ));
         handle.setHidden(false);
@@ -305,16 +309,25 @@ impl MarkdownEditor {
         let marked: bool = msg_send![self, hasMarkedText];
         let start = self.convertPoint_fromView(event.locationInWindow(), None);
         let margin = start.x < EDITOR_INSET - 2.0 || start.x > self.bounds().size.width - EDITOR_INSET + 2.0;
+        let flags = event.modifierFlags();
         if !margin || !self.isEditable() || marked || event.clickCount() != 1
-            || event.modifierFlags().intersects(NSEventModifierFlags::Shift | NSEventModifierFlags::Command | NSEventModifierFlags::Control | NSEventModifierFlags::Option)
+            || flags.intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Control | NSEventModifierFlags::Option)
         {
             return false;
         }
         let source = self.string().to_string();
+        // With Shift the drag adds to the blocks already selected.
+        let base = match flags.contains(NSEventModifierFlags::Shift) {
+            true => {
+                let (print, ranges) = &*self.ivars().selected_blocks.borrow();
+                if *print == fingerprint(&source) { ranges.clone() } else { Vec::new() }
+            }
+            false => Vec::new(),
+        };
         let (note, boxes) = self.measured_blocks();
         *self.ivars().marquee.borrow_mut() = Some(BlockMarquee {
             down: Retained::retain(event as *const NSEvent as *mut NSEvent).expect("live event"),
-            start, source, note, boxes, dragged: false,
+            start, source, note, boxes, dragged: false, base,
         });
         true
     }
@@ -335,7 +348,8 @@ impl MarkdownEditor {
             NSSize::new((marquee.start.x - point.x).abs(), bottom - top),
         )));
         let hit = |index: &usize| marquee.boxes[*index].is_some_and(|b| b.rect.origin.y < bottom && top < b.rect.origin.y + b.rect.size.height);
-        let selected: Vec<usize> = (0..marquee.note.len()).filter(hit).collect();
+        let kept = |index: &usize| marquee.base.contains(&marquee.note[*index].bytes);
+        let selected: Vec<usize> = (0..marquee.note.len()).filter(|i| hit(i) || kept(i)).collect();
         *self.ivars().selected_blocks.borrow_mut() = (fingerprint(&marquee.source), selected.iter().map(|i| marquee.note[*i].bytes.clone()).collect());
         *self.ivars().block_marks.borrow_mut() = selected.iter().filter_map(|i| marquee.boxes[*i].map(|b| b.rect)).collect();
         drop(active);
@@ -350,6 +364,9 @@ impl MarkdownEditor {
         self.ivars().block_marquee.set(None);
         self.setNeedsDisplay(true);
         if !marquee.dragged {
+            // A Shift click that never moved is an ordinary click: the kept
+            // selection goes, as it does for any other click.
+            self.clear_block_selection();
             return Some(Some(marquee.down));
         }
         if let Some(window) = self.window() {
@@ -425,6 +442,42 @@ fn dropped(source: &str, note: &[note_blocks::Block], moving: &[usize], drop: Bl
     }
 }
 
+/// Selected blocks that hold text, without measuring the layout.
+pub unsafe fn selected_block_count(text: &NSTextView) -> usize {
+    let Some(editor) = text.downcast_ref::<MarkdownEditor>() else { return 0 };
+    let (print, ranges) = &*editor.ivars().selected_blocks.borrow();
+    if ranges.is_empty() { return 0; }
+    let source = text.string().to_string();
+    if *print != fingerprint(&source) { return 0; }
+    ranges.iter().filter(|r| source.get((*r).clone()).is_some_and(|t| !t.trim().is_empty())).count()
+}
+
+/// What attaching the selected blocks now would send.
+pub unsafe fn note_excerpt(text: &NSTextView, title: &str) -> Result<note_context::Excerpt, String> {
+    let Some(editor) = text.downcast_ref::<MarkdownEditor>() else { return Err("노트를 열어 주세요".into()) };
+    let source = editor.string().to_string();
+    let note = note_structure(&source);
+    let selected = editor.selected_blocks(&source, &note);
+    note_context::excerpt(title, &source, &note, &selected)
+}
+
+/// Select the blocks a question was about and scroll them near the top.
+pub unsafe fn reveal_blocks(text: &NSTextView, blocks: &[Range<usize>], heads: &[String]) -> bool {
+    let Some(editor) = text.downcast_ref::<MarkdownEditor>() else { return false };
+    let source = editor.string().to_string();
+    let note = note_structure(&source);
+    let found = note_context::locate(&source, &note, blocks, heads);
+    let Some(first) = found.first().copied() else { return false };
+    editor.scrollRangeToVisible(utf16_range(&source, note[first].bytes.start..note[first].bytes.start));
+    *editor.ivars().block_cache.borrow_mut() = None;
+    editor.select_blocks(&source, found.iter().map(|i| note[*i].bytes.clone()).collect());
+    let (_, boxes) = editor.measured_blocks();
+    if let Some(outline) = boxes.get(first).copied().flatten() {
+        editor.scrollPoint(NSPoint::new(0.0, (outline.rect.origin.y - 48.0).max(0.0)));
+    }
+    true
+}
+
 impl BlockHandle {
     unsafe fn begin_drag(&self, event: &NSEvent) {
         let Some(text) = self.ivars().text.load() else {
@@ -443,7 +496,18 @@ impl BlockHandle {
             return;
         };
         let selected = editor.selected_blocks(&source, &note);
-        let moving: Vec<usize> = if selected.contains(&own) { selected } else { note_blocks::subtree(&note, own).collect() };
+        // With Shift the block joins the blocks already selected, as a Shift
+        // marquee drag does; a click then selects them all and a drag moves them all.
+        let moving: Vec<usize> = if selected.contains(&own) {
+            selected
+        } else if event.modifierFlags().contains(NSEventModifierFlags::Shift) {
+            let mut joined: Vec<usize> = selected.into_iter().chain(note_blocks::subtree(&note, own)).collect();
+            joined.sort_unstable();
+            joined.dedup();
+            joined
+        } else {
+            note_blocks::subtree(&note, own).collect()
+        };
         let boxes = editor.block_boxes(&source, &note);
         *self.ivars().drag.borrow_mut() = Some(BlockDrag {
             origin: event.locationInWindow(), source, note, rows, boxes, moving, dragged: false, drop: None,

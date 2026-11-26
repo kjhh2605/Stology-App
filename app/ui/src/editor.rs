@@ -28,6 +28,8 @@ mod markdown_input;
 mod markdown_shortcuts;
 #[path = "note_blocks.rs"]
 mod note_blocks;
+#[path = "note_context.rs"]
+pub mod note_context;
 use note_blocks::Placement;
 #[path = "smart_edit.rs"]
 mod smart_edit;
@@ -505,8 +507,12 @@ define_class!(
         fn mouse_down(&self, event: &NSEvent) { unsafe {
             image_edit::select_image(self, None);
             self.ivars().empty_text_selection.set(None);
+            if self.begin_block_marquee(event) {
+                // A Shift drag keeps the selection; it is redrawn as the drag grows.
+                if !event.modifierFlags().contains(NSEventModifierFlags::Shift) { self.clear_block_selection(); }
+                return;
+            }
             self.clear_block_selection();
-            if self.begin_block_marquee(event) { return; }
             self.click(event);
         }}
         #[unsafe(method(mouseDragged:))]
@@ -544,6 +550,8 @@ define_class!(
         fn cut_blocks(&self, sender: Option<&AnyObject>) { unsafe {
             if self.copy_selected_blocks() { self.delete_selected_blocks(); } else { let _: () = msg_send![super(self), cut:sender]; }
         }}
+        #[unsafe(method(deleteSelectedBlocks:))]
+        fn delete_blocks(&self, _sender: Option<&AnyObject>) { unsafe { self.delete_selected_blocks(); } }
         #[unsafe(method(moveToBeginningOfLine:))]
         fn move_line_start(&self, sender: Option<&AnyObject>) { unsafe {
             let _: () = msg_send![super(self), moveToBeginningOfLine:sender];

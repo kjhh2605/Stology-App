@@ -9,6 +9,11 @@ impl MarkdownEditor {
         let menu = NSMenu::new(self.mtm());
         menu.setAutoenablesItems(false);
         menu.setAllowsContextMenuPlugIns(false);
+        let source = self.string().to_string();
+        if !self.selected_blocks(&source, &note_structure(&source)).is_empty() {
+            self.add_block_menu_items(&menu);
+            return Some(menu);
+        }
         for (title, symbol, action) in [
             (
                 "코드 블록",
@@ -36,6 +41,29 @@ impl MarkdownEditor {
             menu.addItem(&item);
         }
         Some(menu)
+    }
+
+    /// Actions for the selected blocks, and asking the study assistant about them.
+    unsafe fn add_block_menu_items(&self, menu: &NSMenu) {
+        for (title, action, key, mine) in [
+            ("잘라내기", sel!(cut:), "", true),
+            ("복사", sel!(copy:), "", true),
+            ("삭제", sel!(deleteSelectedBlocks:), "", true),
+            ("학습도우미에게 묻기", sel!(askAssistant:), "l", false),
+        ] {
+            if !mine {
+                menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
+            }
+            let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(self.mtm()),
+                &NSString::from_str(title),
+                Some(action),
+                &NSString::from_str(key),
+            );
+            // The app delegate answers askAssistant: through the responder chain.
+            if mine { item.setTarget(Some(self)); }
+            menu.addItem(&item);
+        }
     }
 
     unsafe fn insert_block_text(&self, replacement: &NSString, range: NSRange) {

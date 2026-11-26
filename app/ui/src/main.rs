@@ -22,6 +22,7 @@ mod chat_panel;
 mod chat_messages;
 mod chat_rich_text;
 mod chat_attachments;
+mod chat_note;
 mod diagram_canvas;
 mod document_tree;
 mod editor;
@@ -265,6 +266,11 @@ define_class!(
             if text.as_ref().is_some_and(|text| editor::add_link(text)) { return; }
             STATE.with(|s|if let Ok(mut s)=s.try_borrow_mut(){if let Some(s)=s.as_mut(){if let Some(field)=&s.search{s._window.makeFirstResponder(Some(field));field.selectText(None);}}});
         }}
+        /// ⌘L·블록 우클릭 메뉴: 보고 있는 노트를 학습도우미 질문에 붙인다.
+        #[unsafe(method(askAssistant:))]
+        fn ask_assistant(&self, _sender: Option<&AnyObject>) {
+            STATE.with(|s| if let Ok(mut s) = s.try_borrow_mut() { if let Some(s) = s.as_mut() { unsafe { s.ask_assistant(); } } });
+        }
         #[unsafe(method(animateSidebar:))]
         fn animate_sidebar(&self, _timer: &NSTimer) {
             STATE.with(|s| if let Ok(mut s) = s.try_borrow_mut() {
@@ -1960,6 +1966,60 @@ impl State {
             left, size.height - 91. + lift, (size.width - left - TITLE_DIVIDER_INSET).max(0.), 1.,
         ));
         self.analysis_help.setFrame(rect((size.width - 182. - help_width).max(28.), size.height - 49., help_width, 18.));
+    }
+    /// 학습도우미에 붙일 수 있는 노트: 편집기에 열린 노트·초안·정리 제안·새 노트.
+    unsafe fn note_source(&self) -> Option<chat_note::NoteSource> {
+        if self.workspace.is_none() || self.map.is_some() || self.preview.is_some() || self.snapshot
+            || self.diagram.is_some() || !self.text.isEditable() || self.text.string().length() == 0 {
+            return None;
+        }
+        let kind = self.document.as_ref().map(|d| strv(d, "kind")).unwrap_or_default();
+        if !matches!(kind.as_str(), "" | "md" | "draft" | "suggestion") { return None; }
+        let title = self.document.as_ref().map(|d| strv(d, "title")).filter(|t| !t.is_empty())
+            .unwrap_or_else(|| self.blank_title.clone());
+        // 저장된 노트·초안만 다시 열 수 있다. 새 노트와 정리 제안은 열려 있을 때만 찾아간다.
+        let doc = self.document.as_ref().filter(|_| matches!(kind.as_str(), "md" | "draft"))
+            .map(|d| json!({"id": d["id"], "kind": d["kind"], "title": d["title"]}))
+            .unwrap_or(Value::Null);
+        Some(chat_note::NoteSource { title, doc, text: self.text.clone() })
+    }
+    unsafe fn ask_assistant(&mut self) {
+        self.chat.set_note(self.note_source());
+        if let Err(e) = self.chat.attach_note() {
+            self.set_status(&e);
+            return;
+        }
+        // 붙인 다음 바로 질문을 쓸 수 있게 학습도우미를 연다.
+        if !self.sidebar_open[1] { self.toggle_sidebar(1); }
+        if !self.chat_mode { self.dispatch_action(Action::RightMode(true)); }
+        let input = self.chat.input();
+        self._window.makeFirstResponder(Some(&input));
+    }
+    /// 질문 위 이름표: 그 노트를 열고 붙였던 블록을 골라 보여 준다.
+    unsafe fn reveal_note(&mut self, context: &Value) {
+        let doc = &context["doc"];
+        let open_id = self.document.as_ref().map(|d| strv(d, "id")).unwrap_or_default();
+        let same = if doc.is_object() { strv(doc, "id") == open_id } else { self.note_source().is_some_and(|n| n.title == strv(context, "title")) };
+        if !same {
+            if !doc.is_object() {
+                self.set_status("저장하지 않은 노트라 다시 열 수 없어요");
+                return;
+            }
+            self.dispatch_action(Action::Open(doc.clone()));
+            if self.document.as_ref().map(|d| strv(d, "id")) != Some(strv(doc, "id")) {
+                self.set_status("붙였던 노트를 열지 못했어요");
+                return;
+            }
+        }
+        let blocks: Vec<std::ops::Range<usize>> = context["blocks"].as_array().into_iter().flatten()
+            .filter_map(|r| Some(r[0].as_u64()? as usize..r[1].as_u64()? as usize)).collect();
+        let heads: Vec<String> = context["heads"].as_array().into_iter().flatten()
+            .map(|h| h.as_str().unwrap_or("").to_owned()).collect();
+        if editor::reveal_blocks(&self.text, &blocks, &heads) {
+            self._window.makeFirstResponder(Some(&self.text));
+        } else {
+            self.set_status("노트가 바뀌어 붙였던 부분을 찾지 못했어요");
+        }
     }
     fn editing_suggestion(&self) -> Option<&Value> {
         self.document.as_ref().filter(|doc| doc["kind"] == "suggestion")
@@ -5052,7 +5112,9 @@ impl State {
         self.poll_cleanup();
         let ws = self.workspace.clone();
         self.chat.connection(self.provider_info.as_ref());
+        self.chat.set_note(self.note_source());
         if self.chat.tick(ws.as_deref()) { self.connect(); }
+        if let Some(context) = self.chat.take_reveal() { self.reveal_note(&context); }
         ai_settings::tick();
         organize_panel::tick();
         if self.chat.take_notes_changed() {
@@ -5698,6 +5760,7 @@ unsafe fn menu(app: &NSApplication, target: &Delegate, updater: Option<&AnyObjec
         ("붙여넣기", sel!(paste:), "v"),
         ("모두 선택", sel!(selectAll:), "a"),
         ("선택 영역 확장", sel!(expandSelection:), "d"),
+        ("학습도우미에게 묻기", sel!(askAssistant:), "l"),
     ] {
         let i = NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm()),

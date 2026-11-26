@@ -163,6 +163,8 @@ struct Running {
     answer: String,
     prompt: String,
     images: usize,
+    /// 이 질문에 붙인 노트.
+    context: Value,
 }
 pub struct Panel {
     pub view: Retained<NSView>,
@@ -238,6 +240,13 @@ pub struct Panel {
     flash: Option<(String, Instant)>,
     /// 정리 제안이 바뀌었을 수 있다. 자료 탭이 다시 읽는다.
     notes_changed: bool,
+    /// 편집기에 열려 있는 노트. 메인 화면이 틱마다 넘긴다.
+    note: Option<chat_note::NoteSource>,
+    note_chip: chat_note::NoteChip,
+    /// ⌘L로 붙인 노트 발췌. 다음 질문과 함께 간다.
+    attached: Option<Value>,
+    /// 이름표를 눌러 노트에서 다시 볼 문맥. 메인 화면이 가져간다.
+    reveal: Option<Value>,
 }
 fn versioned_model(provider: &str, id: &str) -> bool {
     if provider == "antigravity" { return !id.is_empty() && !["auto","default","latest"].contains(&id); }
@@ -492,7 +501,7 @@ impl Panel {
         status.setMaximumNumberOfLines(3);
         view.addSubview(&status);
         let notice = text_label(
-            "입력한 대화만 전송돼요 · ⌘ + Enter 전송",
+            "입력한 대화와 붙인 노트만 전송돼요 · ⌘ + Enter 전송",
             rect(12., 144., 316., 18.),
             10.5,
             false,
@@ -595,6 +604,7 @@ impl Panel {
         view.addSubview_positioned_relativeTo(&history, NSWindowOrderingMode::Above, Some(&search));
         let new = button("새 대화", 4);
         theme::chat_pill_button(&new, "note-plus");
+        let note_chip = chat_note::NoteChip::new(&view, &target, &composer);
         let bottom = button("↓ 새 답변", 6);
         theme::chat_new_answer_button(&bottom);
         bottom.setHidden(true);
@@ -667,6 +677,10 @@ impl Panel {
             quiet_for: Duration::from_secs(60 * rpc(json!({"op":"ai.settings.get"})).ok().and_then(|v| v["routing"]["distill"]["quiet_minutes"].as_u64()).unwrap_or(5)),
             flash: None,
             notes_changed: false,
+            note: None,
+            note_chip,
+            attached: None,
+            reveal: None,
         };
         panel.refresh_models();
         panel
@@ -947,6 +961,9 @@ impl Panel {
         }
         self.last_draft = strv(&self.data, "draft");
         self.input.setString(&NSString::from_str(&self.last_draft));
+        // 붙인 노트는 그 과목의 질문에만 간다.
+        self.attached = None;
+        self.note_chip.close_preview();
         self.messages.clear();
         self.render();
         if let Some(pos) = self
@@ -967,9 +984,12 @@ impl Panel {
         self.view.setFrame(rect(0., 0., w, h));
         // 첨부 썸네일 줄은 대화 영역을 밀지 않고 그 위에 겹친다. 겹치는 아래쪽만
         // 대화가 투명하게 사라지도록 그라데이션 마스크를 건다.
-        let strip = if self.attachments.is_empty() { 0. } else { chat_attachments::STRIP_HEIGHT + 6. };
+        let chip = if self.note_chip.visible() { chat_note::CHIP_ROW } else { 0. };
+        let strip = chip + if self.attachments.is_empty() { 0. } else { chat_attachments::STRIP_HEIGHT + 6. };
         let grow = INPUT_GROW.with(Cell::get).clamp(0., INPUT_GROW_MAX.min((h - 282.).max(0.)));
-        self.strip.frame(rect(16., 142. + grow, w - 32., chat_attachments::STRIP_HEIGHT));
+        // 입력창 바로 위에 노트 칩, 그 위에 이미지 썸네일 줄이 놓인다.
+        self.note_chip.frame(w, 142. + grow, h - 76.);
+        self.strip.frame(rect(16., 142. + grow + chip, w - 32., chat_attachments::STRIP_HEIGHT));
         // 아래에서 위로: 안내 문구 · 유리 캡슐(조작 줄 + 입력란) · 대화 · 상태 줄.
         self.layout_controls();
         self.new.setFrame(rect(w - 94., h - 38., 80., 28.));
@@ -978,7 +998,8 @@ impl Panel {
         self.set_history_frame(false);
         self.status.setFrame(rect(18., h - 69., w - 36., 28.));
         self.messages.frame(rect(0., 150. + grow, w, (h - 220. - grow).max(80.)));
-        self.messages.fade_bottom(if strip > 0. { 142. + chat_attachments::STRIP_HEIGHT - 150. } else { 0. });
+        // 노트 칩은 대화 위에 그대로 떠 있다. 흐리게 하는 건 썸네일 줄 뒤뿐이다.
+        self.messages.fade_bottom(if self.attachments.is_empty() { 0. } else { 142. + chip + chat_attachments::STRIP_HEIGHT - 150. });
         self.notice.setFrame(rect(18., 10., w - 36., 16.));
         self.composer.setFrame(rect(12., 34., w - 24., 104. + grow));
         self.input_scroll.setFrame(rect(18., 86., w - 36., 42. + grow));
@@ -1021,6 +1042,7 @@ impl Panel {
             self.bottom.setHidden(true);
             self.scroll_to_bottom = false;
         }
+        self.render_note_chip();
         self.placeholder
             .setHidden(!self.input.string().to_string().is_empty());
         let marked: bool = msg_send![&self.input, hasMarkedText];
@@ -1116,8 +1138,10 @@ impl Panel {
         };
         let mut input = child.stdin.take().unwrap();
         let output = child.stdout.take().unwrap();
+        let context = self.attached.clone().unwrap_or(Value::Null);
         let request = json!({"workspace_id":self.workspace,"provider":self.selected,"model":self.selected_model(),"effort":self.selected_effort(),"text":prompt,
-            "images":self.attachments.iter().map(|a|json!({"mime":a.mime,"data":a.data})).collect::<Vec<_>>()});
+            "images":self.attachments.iter().map(|a|json!({"mime":a.mime,"data":a.data})).collect::<Vec<_>>(),
+            "context":context});
         if writeln!(input, "{request}")
             .and_then(|_| input.flush())
             .is_err()
@@ -1155,6 +1179,7 @@ impl Panel {
             answer: String::new(),
             prompt,
             images: self.attachments.len(),
+            context,
         });
     }
     fn history_content_height(&self) -> f64 {
@@ -1522,6 +1547,9 @@ impl Panel {
    },
    n if n<0 && self.history_open=>{if let Err(error)=self.switch_conversation(Some((-1-n) as usize)){self.error=error;}},
    6=>{self.messages.bottom();self.bottom.setHidden(true);},
+   chat_note::CHIP_TAG=>{if self.note_chip.preview_open(){self.note_chip.close_preview();}else{self.open_note_preview();}let (w,h)=self.size;self.layout(w,h);},
+   chat_note::CHIP_CLOSE_TAG=>{self.attached=None;self.note_chip.close_preview();self.render_note_chip();},
+   chat_note::PREVIEW_CLOSE_TAG=>{self.note_chip.close_preview();},
    8=>{if let Some(mut r)=self.unsaved.clone(){r["op"]=json!("chat.save");match rpc(r){Ok(_)=>{self.unsaved=None;self.error.clear();},Err(e)=>self.error=format!("저장 실패 · {e}")}}},
    n if (1000..2000).contains(&n)=>{
        let turn=self.data["turns"][n as usize-1000].clone();
@@ -1531,8 +1559,15 @@ impl Panel {
            if let Some(ws)=self.workspace.clone(){let provider=self.selected.clone();self.judge("distill.scan",&ws,&provider);}
        }
    },
-   n if (2000..3000).contains(&n)=>{if !self.busy(){let prompt=strv(&self.data["turns"][n as usize-2000],"user");if self.input.string().to_string().trim().is_empty(){self.input.setString(&NSString::from_str(&prompt));self.send();}else{self.error="작성 중인 질문을 먼저 전송하거나 비워 주세요.".into();}}},
+   n if (2000..3000).contains(&n)=>{if !self.busy(){let turn=self.data["turns"][n as usize-2000].clone();let prompt=strv(&turn,"user");if self.input.string().to_string().trim().is_empty(){
+       // 다시 시도는 그 질문에 붙였던 노트도 다시 보낸다.
+       if turn["context"].is_object(){self.attached=Some(turn["context"].clone());}
+       self.input.setString(&NSString::from_str(&prompt));self.send();}else{self.error="작성 중인 질문을 먼저 전송하거나 비워 주세요.".into();}}},
    n if (chat_messages::NOTE_TAG as i64..chat_messages::NOTE_TAG as i64+3000).contains(&n)=>self.note_action(n-chat_messages::NOTE_TAG as i64),
+   n if (chat_messages::CONTEXT_TAG as i64..chat_messages::CONTEXT_TAG as i64+1000).contains(&n)=>{
+       let context=self.data["turns"][(n-chat_messages::CONTEXT_TAG as i64) as usize]["context"].clone();
+       if context.is_object(){self.reveal=Some(context);}
+   },
    _=>{}}
         }
         self.refresh_history(false);
@@ -1609,7 +1644,7 @@ impl Panel {
                 }
                 let turns = self.data["turns"].as_array_mut().unwrap();
                 if !turns.iter().any(|t| t["id"] == r.turn) {
-                    turns.push(json!({"id":r.turn,"user":r.prompt,"images":r.images,"answer":"","state":"running"}));
+                    turns.push(json!({"id":r.turn,"user":r.prompt,"images":r.images,"context":r.context,"answer":"","state":"running"}));
                 }
                 self.scroll_to_bottom = true;
             }
@@ -1628,6 +1663,9 @@ impl Panel {
         if clear_attachments && !self.attachments.is_empty() {
             self.attachments.clear();
             self.attachments_changed();
+        }
+        if clear_attachments && self.attached.take().is_some() {
+            self.note_chip.close_preview();
         }
         // 답이 끝나면 앱 기록만으로 정리 대상을 가린다. 모델은 부르지 않는다.
         if let Some((workspace, provider)) = finished {
@@ -1685,6 +1723,74 @@ impl Panel {
                 if tag / 1000 == 0 { self.judge("distill.scan", &ws, &provider); }
             }
             Err(e) => self.error = e,
+        }
+    }
+    /// 편집기에 열려 있는 노트를 알려 준다. 노트가 아니면 `None`.
+    pub fn set_note(&mut self, note: Option<chat_note::NoteSource>) {
+        self.note = note;
+    }
+    /// 이름표를 눌러 노트에서 다시 볼 문맥.
+    pub fn take_reveal(&mut self) -> Option<Value> {
+        self.reveal.take()
+    }
+    pub fn input(&self) -> Retained<NSTextView> {
+        self.input.clone()
+    }
+    /// ⌘L·블록 메뉴: 지금 보고 있는 노트를 다음 질문에 붙인다.
+    pub unsafe fn attach_note(&mut self) -> Result<(), String> {
+        if self.workspace.is_none() { return Err("과목을 선택하면 노트를 붙일 수 있어요".into()); }
+        if self.running.as_ref().is_some_and(|r| !r.accepted) { return Err("질문을 보내는 중이에요 · 잠시 뒤 다시 붙여 주세요".into()); }
+        let note = self.note.as_ref().ok_or("노트를 열고 붙일 블록을 골라 주세요")?;
+        self.attached = Some(note.context()?);
+        if self.note_chip.preview_open() { self.open_note_preview(); }
+        self.render_note_chip();
+        Ok(())
+    }
+    /// 칩: 붙인 노트가 있으면 그것을, 없으면 보고 있는 노트를 흐리게 보여 준다.
+    unsafe fn render_note_chip(&mut self) {
+        let chip = if self.workspace.is_none() {
+            None
+        } else if let Some(a) = &self.attached {
+            Some((format!("{} · {}", strv(a, "title"), strv(a, "label")), true))
+        } else {
+            // 제안 칩은 노트에서 블록을 골랐을 때만 보인다.
+            self.note.as_ref().and_then(|n| n.label().map(|label| (format!("{} · {label}", n.title), false)))
+        };
+        let visible = self.note_chip.visible();
+        let changed = self.note_chip.show(chip.clone()) | self.note_chip.tick();
+        // 미리보기가 보고 있는 노트를 보여 주는 중이면 고른 블록이 바뀔 때 다시 채운다.
+        if self.note_chip.preview_open() && self.attached.is_none() {
+            match &chip {
+                Some(_) => self.open_note_preview(),
+                None => self.note_chip.close_preview(),
+            }
+        }
+        if changed || visible != self.note_chip.visible() {
+            let (w, h) = self.size;
+            self.layout(w, h);
+        }
+    }
+    /// 칩을 눌렀을 때: AI에게 보낼 원문 전체를 미리보기로 연다. 붙이지는 않는다.
+    unsafe fn open_note_preview(&mut self) {
+        let opened = if let Some(a) = &self.attached {
+            let body = strv(a, "text");
+            self.note_chip.open(&format!("a:{body}"), &body);
+            true
+        } else if let Some((note, label)) = self.note.as_ref().and_then(|n| n.label().map(|l| (n, l))) {
+            let key = format!("s:{} · {label}", note.title);
+            if self.note_chip.shown() != Some(key.as_str()) {
+                match note.context() {
+                    Ok(c) => self.note_chip.open(&key, &strv(&c, "text")),
+                    Err(e) => self.note_chip.open(&key, &e),
+                }
+            }
+            true
+        } else {
+            false
+        };
+        if opened {
+            let (w, h) = self.size;
+            self.layout(w, h);
         }
     }
     pub unsafe fn prepare_quit(&mut self) -> Result<bool, String> {

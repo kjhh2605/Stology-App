@@ -132,6 +132,10 @@ CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY,value TEXT NOT NULL)
         .query_map([], |r| r.get::<_, String>(1))?
         .collect::<std::result::Result<Vec<_>, _>>()?.iter().any(|n| n == "images");
     if !has_images { c.execute("ALTER TABLE turns ADD COLUMN images INTEGER NOT NULL DEFAULT 0", [])?; }
+    let has_context = c.prepare("PRAGMA table_info(turns)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?.iter().any(|n| n == "context");
+    if !has_context { c.execute("ALTER TABLE turns ADD COLUMN context TEXT NOT NULL DEFAULT ''", [])?; }
     crate::distill::schema(&c)?;
     Ok(c)
 }
@@ -294,9 +298,10 @@ pub fn handle(root: &Path, r: &Value) -> Result<Value> {
     result["workspace_id"] = r["workspace_id"].clone();
     result["provider"] = r["provider"].clone();
     let mut q = c.prepare(
-        "SELECT id,run,user,answer,state,error,model,effort,images,mark,distill FROM turns WHERE conversation=?1 ORDER BY rowid",
+        "SELECT id,run,user,answer,state,error,model,effort,images,mark,distill,context FROM turns WHERE conversation=?1 ORDER BY rowid",
     )?;
-    let rows=q.query_map([&id],|r|Ok(json!({"id":r.get::<_,String>(0)?,"run_id":r.get::<_,String>(1)?,"user":r.get::<_,String>(2)?,"answer":r.get::<_,String>(3)?,"state":r.get::<_,String>(4)?,"error":r.get::<_,String>(5)?,"model":r.get::<_,String>(6)?,"effort":r.get::<_,String>(7)?,"images":r.get::<_,i64>(8)?,"mark":r.get::<_,String>(9)?,"distill":r.get::<_,String>(10)?})))?;
+    let rows=q.query_map([&id],|r|Ok(json!({"id":r.get::<_,String>(0)?,"run_id":r.get::<_,String>(1)?,"user":r.get::<_,String>(2)?,"answer":r.get::<_,String>(3)?,"state":r.get::<_,String>(4)?,"error":r.get::<_,String>(5)?,"model":r.get::<_,String>(6)?,"effort":r.get::<_,String>(7)?,"images":r.get::<_,i64>(8)?,"mark":r.get::<_,String>(9)?,"distill":r.get::<_,String>(10)?,
+        "context":serde_json::from_str::<Value>(&r.get::<_,String>(11)?).unwrap_or(Value::Null)})))?;
     result["turns"] = json!(rows.collect::<std::result::Result<Vec<_>, _>>()?);
     Ok(result)
 }
@@ -315,6 +320,33 @@ fn attached_images(r: &Value) -> Result<Vec<(String, String)>> {
     }
     anyhow::ensure!(images.len() <= MAX_IMAGES, "이미지는 한 번에 {MAX_IMAGES}장까지 첨부할 수 있어요");
     Ok(images)
+}
+/// 붙인 노트 발췌의 상한. 앱이 블록 단위로 맞춰 보내며, 넘으면 받지 않는다.
+pub const MAX_NOTE_CONTEXT: usize = 16 * 1024;
+/// 사용자가 ⌘L로 붙인 노트 발췌. 앱이 만든 글을 그대로 보내고, 다시 찾아갈
+/// 정보(문서·블록 범위·첫 줄)와 함께 질문 기록에 남긴다. 붙이지 않았으면 `None`.
+fn note_context(r: &Value) -> Result<Option<Value>> {
+    let c = &r["context"];
+    if c.is_null() { return Ok(None); }
+    anyhow::ensure!(c.is_object(), "붙인 노트 형식이 올바르지 않습니다");
+    let text = c["text"].as_str().filter(|t| !t.trim().is_empty()).context("붙인 노트 내용 없음")?;
+    anyhow::ensure!(text.len() <= MAX_NOTE_CONTEXT, "붙인 노트는 16KB 이내여야 해요 · 블록을 줄여 주세요");
+    let short = |k: &str| c[k].as_str().unwrap_or("").chars().take(200).collect::<String>();
+    let blocks: Vec<Value> = c["blocks"].as_array().into_iter().flatten().take(500)
+        .filter_map(|b| Some(json!([b[0].as_u64()?, b[1].as_u64()?]))).collect();
+    let heads: Vec<String> = c["heads"].as_array().into_iter().flatten().take(500)
+        .map(|h| h.as_str().unwrap_or("").chars().take(80).collect()).collect();
+    let doc = if c["doc"].is_object() {
+        json!({"id": c["doc"]["id"].as_str().unwrap_or(""), "kind": c["doc"]["kind"].as_str().unwrap_or(""), "title": c["doc"]["title"].as_str().unwrap_or("")})
+    } else { Value::Null };
+    Ok(Some(json!({"title": short("title"), "label": short("label"), "text": text, "doc": doc, "blocks": blocks, "heads": heads})))
+}
+/// 공급자에게 가는 글: 붙인 노트가 있으면 발췌 뒤에 질문을 둔다.
+fn with_note_context(prompt: &str, context: Option<&Value>) -> String {
+    match context.and_then(|c| c["text"].as_str()) {
+        Some(note) => format!("{note}\n\n[질문]\n{prompt}"),
+        None => prompt.to_owned(),
+    }
 }
 fn claude_content(prompt: &str, images: &[(String, String)]) -> Value {
     let mut content: Vec<Value> = images.iter()
@@ -645,7 +677,7 @@ const CODEX_DISABLED: [&str; 21] = [
     "agent_message_board",
     "agent_message_board_mcp",
 ];
-const INSTRUCTIONS:&str="You are Stology's study assistant. Answer the user's text in their language. Only the conversation, including any images the user attached, is available. Do not claim access to files, documents or tools. Do not execute tools.";
+const INSTRUCTIONS:&str="You are Stology's study assistant. Answer the user's text in their language. Only the conversation, including any images the user attached and any note excerpt the user attached under [보고 있는 노트: ...], is available. Treat that excerpt as the context of the question that follows [질문]. Do not claim access to other files, documents or tools. Do not execute tools.";
 fn command(root: &Path, p: &str, work: &Path, session: Option<&str>, model: &str, effort: &str) -> Result<Command> {
     let binary =
         super::providers::bin(root, p).context("공식 CLI가 없습니다. 연결에서 설치하세요.")?;
@@ -794,6 +826,9 @@ fn run(
         .filter(|s| !s.trim().is_empty() || !images.is_empty())
         .context("질문을 입력하세요")?;
     anyhow::ensure!(prompt.len() <= 128 * 1024, "질문은 128KB 이내로 입력하세요");
+    let context = note_context(r)?;
+    let sent = with_note_context(prompt, context.as_ref());
+    let context_record = context.as_ref().map(Value::to_string).unwrap_or_default();
     let c = db(root)?;
     recover(&c)?;
     let mut model = r["model"].as_str().map(str::to_owned).unwrap_or(selected_model(&c, p)?);
@@ -829,7 +864,7 @@ fn run(
     let work = root.join("chat-work").join(&id);
     fs::create_dir_all(&work)?;
     if p == "antigravity" {
-        return run_antigravity(root, r, control, out, &c, &id, session.as_deref(), &work, &model, &effort, prompt, &images);
+        return run_antigravity(root, r, control, out, &c, &id, session.as_deref(), &work, &model, &effort, prompt, &sent, &context_record, &images);
     }
     let mut child = Process(
         command(root, p, &work, session.as_deref(), &model, &effort)?
@@ -863,7 +898,7 @@ fn run(
     let turn = uuid::Uuid::new_v4().to_string();
     let run = uuid::Uuid::new_v4().to_string();
     let tx = c.unchecked_transaction()?;
-    tx.execute("INSERT INTO turns(id,conversation,run,user,state,created,model,effort,images) VALUES(?1,?2,?3,?4,'running',?5,?6,?7,?8)",params![turn,id,run,prompt,chrono::Utc::now().to_rfc3339(),model,effort,images.len() as i64])?;
+    tx.execute("INSERT INTO turns(id,conversation,run,user,state,created,model,effort,images,context) VALUES(?1,?2,?3,?4,'running',?5,?6,?7,?8,?9)",params![turn,id,run,prompt,chrono::Utc::now().to_rfc3339(),model,effort,images.len() as i64,context_record])?;
     tx.execute("UPDATE conversations SET draft='' WHERE id=?1", [&id])?;
     tx.commit()?;
     let mut seq = 0u64;
@@ -884,7 +919,7 @@ fn run(
     let mut last_save = Instant::now();
     let mut session_missing = false;
     let result = (|| -> Result<&str> {
-        emit("accepted", json!({"text":prompt,"images":images.len()}))?;
+        emit("accepted", json!({"text":prompt,"images":images.len(),"context":context}))?;
         if p == "codex" {
             write_request(
                 &mut input,
@@ -896,7 +931,7 @@ fn run(
             writeln!(
                 input,
                 "{}",
-                json!({"type":"user","message":{"role":"user","content":claude_content(prompt, &images)}})
+                json!({"type":"user","message":{"role":"user","content":claude_content(&sent, &images)}})
             )?;
             input.flush()?;
         }
@@ -1004,7 +1039,7 @@ fn run(
                         &mut input,
                         3,
                         "turn/start",
-                        json!({"effort":if effort.is_empty() {item["default_effort"].clone()}else{json!(effort)},"model":model,"threadId":thread_id,"input":codex_input(prompt, &images),"environments":[]}),
+                        json!({"effort":if effort.is_empty() {item["default_effort"].clone()}else{json!(effort)},"model":model,"threadId":thread_id,"input":codex_input(&sent, &images),"environments":[]}),
                     )?;
                 }
                 if v["id"] == 3 {
@@ -1123,7 +1158,7 @@ fn run(
 #[allow(clippy::too_many_arguments)]
 fn run_antigravity(root: &Path, r: &Value, control: &mpsc::Receiver<String>, out: &mut impl Write,
     c: &Connection, conversation: &str, existing: Option<&str>, work: &Path,
-    model: &str, effort: &str, prompt: &str, images: &[(String,String)]) -> Result<()> {
+    model: &str, effort: &str, prompt: &str, sent: &str, context: &str, images: &[(String,String)]) -> Result<()> {
     let mut client = super::antigravity::Client::spawn(root, work)?;
     client.initialize()?;
     let data = match client.session(work, existing) {
@@ -1141,7 +1176,7 @@ fn run_antigravity(root: &Path, r: &Value, control: &mpsc::Receiver<String>, out
     let turn = uuid::Uuid::new_v4().to_string();
     let run = uuid::Uuid::new_v4().to_string();
     let tx = c.unchecked_transaction()?;
-    tx.execute("INSERT INTO turns(id,conversation,run,user,state,created,model,effort,images) VALUES(?1,?2,?3,?4,'running',?5,?6,?7,?8)",params![turn,conversation,run,prompt,chrono::Utc::now().to_rfc3339(),model,effort,images.len() as i64])?;
+    tx.execute("INSERT INTO turns(id,conversation,run,user,state,created,model,effort,images,context) VALUES(?1,?2,?3,?4,'running',?5,?6,?7,?8,?9)",params![turn,conversation,run,prompt,chrono::Utc::now().to_rfc3339(),model,effort,images.len() as i64,context])?;
     tx.execute("UPDATE conversations SET draft='',session=?1 WHERE id=?2", params![session,conversation])?;
     tx.commit()?;
     let mut sequence = 0;
@@ -1155,7 +1190,7 @@ fn run_antigravity(root: &Path, r: &Value, control: &mpsc::Receiver<String>, out
     let mut cancelled=None;
     let result=(|| -> Result<&str> {
         emit("accepted",json!({"text":prompt,"images":images.len()}))?;
-        let request=client.prompt(session,prompt,images)?;
+        let request=client.prompt(session,sent,images)?;
         let deadline=Instant::now()+Duration::from_secs(600);
         let mut last_save=Instant::now();
         loop {
@@ -1218,6 +1253,23 @@ mod tests {
         let args: Vec<_> = c.get_args().map(|s| s.to_str().unwrap()).collect();
         assert!(args.windows(2).any(|a| a == ["--model", "default"]));
         assert!(!args.contains(&"--effort"));
+    }
+    #[test]
+    fn attached_note_goes_before_the_question_and_is_kept_for_the_label() {
+        assert!(note_context(&json!({"text":"질문"})).unwrap().is_none());
+        let r = json!({"text":"이게 왜 필요해?","context":{"title":"3주차","label":"선택한 블록 1개",
+            "text":"[보고 있는 노트: 3주차]\n[선택한 블록]\n문맥 교환","doc":{"id":"n1","kind":"md","title":"3주차","extra":"x"},
+            "blocks":[[10,24]],"heads":["문맥 교환"]}});
+        let context = note_context(&r).unwrap().unwrap();
+        assert_eq!(context["doc"], json!({"id":"n1","kind":"md","title":"3주차"}));
+        assert_eq!(context["blocks"], json!([[10,24]]));
+        assert_eq!(with_note_context("이게 왜 필요해?", Some(&context)),
+            "[보고 있는 노트: 3주차]\n[선택한 블록]\n문맥 교환\n\n[질문]\n이게 왜 필요해?");
+        assert_eq!(with_note_context("그냥 질문", None), "그냥 질문");
+        let long = json!({"context":{"text":"가".repeat(MAX_NOTE_CONTEXT)}});
+        assert!(note_context(&long).is_err());
+        assert!(note_context(&json!({"context":{"text":"  "}})).is_err());
+        assert!(note_context(&json!({"context":"문자열"})).is_err());
     }
     #[test]
     fn attached_images_are_validated_and_sent_before_text() {

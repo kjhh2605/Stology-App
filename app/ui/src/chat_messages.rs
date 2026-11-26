@@ -46,6 +46,18 @@ unsafe fn bubble_view(user: bool) -> Retained<NSView> {
 }
 /// 답 아래 정리 버튼의 태그가 시작하는 값. 복사(1000대)·다시 시도(2000대)·첨부 닫기(3000대)와 겹치지 않는다.
 pub const NOTE_TAG: isize = 6000;
+/// 질문 위 대화 문맥 이름표의 태그가 시작하는 값. 정리 버튼(6000~8999) 다음이다.
+pub const CONTEXT_TAG: isize = 9000;
+const CONTEXT_HEIGHT: f64 = 20.;
+/// 붙인 노트를 알려 주는 이름표. 누르면 노트의 그 블록으로 간다.
+unsafe fn context_title(button: &NSButton, text: &str) {
+    let title = NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &NSString::from_str(text));
+    let range = NSRange::new(0, title.length());
+    let indigo = NSColor::colorWithSRGBRed_green_blue_alpha(0.31, 0.275, 0.75, 1.);
+    title.addAttribute_value_range(NSForegroundColorAttributeName, &indigo, range);
+    title.addAttribute_value_range(NSFontAttributeName, &font::regular(10.5), range);
+    button.setAttributedTitle(&title);
+}
 /// 말풍선 아래 작은 회색 글자 버튼(복사·다시 시도·정리).
 unsafe fn footer_title(button: &NSButton) {
     let title = NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &button.title());
@@ -117,6 +129,8 @@ struct Bubble {
     retry: Option<Retained<NSButton>>,
     /// 나중에 정리 · 노트로 정리 · 그대로 저장.
     notes: Option<[Retained<NSButton>; 3]>,
+    /// 질문에 붙인 노트의 이름표.
+    context: Option<Retained<NSButton>>,
     user: bool,
     body: String,
     state: String,
@@ -301,6 +315,18 @@ impl Messages {
                         let copy = (!user).then(|| action("복사", 1000 + i as isize));
                         let retry = (!user).then(|| action("다시 시도", 2000 + i as isize));
                         let notes = (!user).then(|| [action("나중에 정리", NOTE_TAG + i as isize), action("노트로 정리", NOTE_TAG + 1000 + i as isize), action("그대로 저장", NOTE_TAG + 2000 + i as isize)]);
+                        let context = (user && t["context"].is_object()).then(|| {
+                            let c = &t["context"];
+                            let b = action("", CONTEXT_TAG + i as isize);
+                            context_title(&b, &format!("{} · {}", strv(c, "title"), strv(c, "label")));
+                            let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str("doc.text"), None);
+                            b.setImage(icon.as_deref());
+                            b.setImagePosition(NSCellImagePosition::ImageLeading);
+                            b.setContentTintColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(0.31, 0.275, 0.75, 1.)));
+                            b.setToolTip(Some(&NSString::from_str("노트에서 이 부분 보기")));
+                            b.setAccessibilityLabel(Some(&NSString::from_str(&format!("붙인 노트 {} · {} · 노트에서 보기", strv(c, "title"), strv(c, "label")))));
+                            b
+                        });
                         self.document.addSubview(&shell);
                         self.bubbles.insert(
                             key.clone(),
@@ -314,6 +340,7 @@ impl Messages {
                                 copy,
                                 retry,
                                 notes,
+                                context,
                                 user,
                                 body: String::new(),
                                 state: String::new(),
@@ -437,12 +464,17 @@ impl Messages {
             let bubble_height = height + pad_y * 2.;
             // 답변 아래에는 복사·다시 시도와 상태 글자가 놓이는 줄이 있다.
             let footer = if b.user { 0. } else { 22. };
-            let row_width = if b.user { bubble_width } else { (w - side * 2.).max(bubble_width) };
-            let x = if b.user { w - side - bubble_width } else { side };
-            b.shell.setFrame(rect(x, y, row_width, bubble_height + footer));
-            b.background.setFrame(rect(0., 0., bubble_width, bubble_height));
+            // 붙인 노트의 이름표는 질문 말풍선 위, 오른쪽 끝에 맞춘다.
+            let tag_width = b.context.as_ref().map_or(0., |c| (c.intrinsicContentSize().width.ceil() + 4.).min(w - side * 2.));
+            let top = if b.context.is_some() { CONTEXT_HEIGHT } else { 0. };
+            let row_width = if b.user { bubble_width.max(tag_width) } else { (w - side * 2.).max(bubble_width) };
+            let x = if b.user { w - side - row_width } else { side };
+            b.shell.setFrame(rect(x, y, row_width, top + bubble_height + footer));
+            let bubble_x = if b.user { row_width - bubble_width } else { 0. };
+            if let Some(c) = &b.context { c.setFrame(rect(row_width - tag_width, 0., tag_width, CONTEXT_HEIGHT - 4.)); }
+            b.background.setFrame(rect(bubble_x, top, bubble_width, bubble_height));
             b.background.setNeedsDisplay(true);
-            b.text.setFrame(rect(pad_x, pad_y, text_width + 1., height));
+            b.text.setFrame(rect(bubble_x + pad_x, top + pad_y, text_width + 1., height));
             if let Some(rich) = &b.rich { rich.view.setFrame(rect(pad_x, pad_y, text_width, height)); }
             b.waiting.view.setFrame(rect(pad_x, pad_y, 32., 18.));
             let mut next = 9.;
@@ -462,7 +494,7 @@ impl Messages {
                 }
             }
             b.label.setFrame(rect(next + 2., bubble_height + 4., 120., 14.));
-            y += bubble_height + footer + 10.;
+            y += top + bubble_height + footer + 10.;
         }
         self.document.setFrame(rect(
             0.,
