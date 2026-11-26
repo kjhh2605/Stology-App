@@ -467,18 +467,20 @@ define_class!(
         fn accessibility_children(&self) -> *mut objc2_foundation::NSArray<NSView> { Retained::autorelease_return(self.subviews()) }
         #[unsafe(method(moveLeft:))]
         fn move_left(&self, sender: Option<&AnyObject>) { unsafe {
+            let before: NSRange = msg_send![self, selectedRange];
             let _: () = msg_send![super(self), moveLeft:sender];
             skip_heading_marker(self, true);
             skip_block_marker(self, true);
-            skip_inline_marker(self, true,inline_syntax);
+            if !settle_inline_selection(self, before, true) { skip_inline_marker(self, true,inline_syntax); }
             skip_code_fence(self, true); skip_image_block(self, true); skip_rule(self, true);
         }}
         #[unsafe(method(moveRight:))]
         fn move_right(&self, sender: Option<&AnyObject>) { unsafe {
+            let before: NSRange = msg_send![self, selectedRange];
             let _: () = msg_send![super(self), moveRight:sender];
             skip_heading_marker(self, false);
             skip_block_marker(self, false);
-            skip_inline_marker(self, false,inline_syntax);
+            if !settle_inline_selection(self, before, false) { skip_inline_marker(self, false,inline_syntax); }
             skip_code_fence(self, false); skip_image_block(self, false); skip_rule(self, false);
         }}
         #[unsafe(method(moveUp:))]
@@ -1097,6 +1099,20 @@ unsafe fn inline_backspace(text: &NSTextView, syntax_for:fn(&str)->Vec<InlineSyn
 
 // Called after native left/right movement. A key moves by one visible composed
 // character, never leaving the insertion point in hidden emphasis/link syntax.
+unsafe fn settle_inline_selection(text: &NSTextView, before: NSRange, backwards: bool) -> bool {
+    let marked: bool = msg_send![text, hasMarkedText];
+    let selection: NSRange = msg_send![text, selectedRange];
+    if marked || before.length == 0 || selection.length != 0 { return false; }
+    let source = text.string().to_string();
+    let caret = byte_for_utf16(&source, selection.location);
+    let markers = inline_marker_ranges(&inline_syntax(&source));
+    let marker = markers.iter().find(|range| if backwards { range.end == caret } else { range.start == caret });
+    let Some(marker) = marker else { return false };
+    let target = if backwards { marker.start } else { marker.end };
+    text.setSelectedRange(NSRange::new(source[..target].encode_utf16().count(), 0));
+    true
+}
+
 unsafe fn skip_inline_marker(text: &NSTextView, backwards: bool, syntax_for:fn(&str)->Vec<InlineSyntax>) {
     let marked: bool = msg_send![text, hasMarkedText];
     let selection: NSRange = msg_send![text, selectedRange];

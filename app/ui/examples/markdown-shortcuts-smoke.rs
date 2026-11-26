@@ -132,6 +132,26 @@ fn main() {
             assert!(value.is_some(), "missing style {open}");
             shortcut(&text, key, flags);
             assert_eq!(text.string().to_string(), "한글 😀", "toggle off {open}");
+            for suffix in ["", " 뒤"] {
+                reset(&text, &format!("한글 😀{suffix}"));
+                text.setSelectedRange(NSRange::new(0, 5));
+                shortcut(&text, key, flags);
+                let _: () = msg_send![&*text, moveRight:std::ptr::null::<AnyObject>()];
+                let caret: NSRange = msg_send![&*text, selectedRange];
+                assert_eq!(caret, NSRange::new(open.encode_utf16().count() + 5 + close.encode_utf16().count(), 0), "right arrow after {open}");
+                let _: () = msg_send![&*text, insertNewline:std::ptr::null::<AnyObject>()];
+                assert_eq!(text.string().to_string(), format!("{open}한글 😀{close}\n{suffix}"), "Enter after {open}");
+            }
+        }
+        for source in ["[한글 😀](https://example.com)", "**_한글 😀_**"] {
+            reset(&text, source);
+            let start = source.find('한').unwrap();
+            text.setSelectedRange(NSRange::new(source[..start].encode_utf16().count(), 5));
+            let _: () = msg_send![&*text, moveRight:std::ptr::null::<AnyObject>()];
+            let caret: NSRange = msg_send![&*text, selectedRange];
+            assert_eq!(caret, NSRange::new(source.encode_utf16().count(), 0), "right arrow after {source}");
+            let _: () = msg_send![&*text, insertNewline:std::ptr::null::<AnyObject>()];
+            assert_eq!(text.string().to_string(), format!("{source}\n"));
         }
         reset(&text, "Undo 😀");
         text.setSelectedRange(NSRange::new(0, 7));
