@@ -40,8 +40,6 @@ use image_edit::{ImageState, InlineImage};
 const NOTE_LINE_HEIGHT: f64 = 26.0;
 const NOTE_PARAGRAPH_SPACING: f64 = 10.0;
 const NOTE_LIST_SPACING: f64 = 4.0;
-const NOTE_HEADING_BEFORE: f64 = 24.0;
-const NOTE_HEADING_AFTER: f64 = 8.0;
 
 unsafe fn input_command(text: &NSTextView, command: markdown_input::Command) -> bool {
     let marked: bool = msg_send![text, hasMarkedText];
@@ -1917,15 +1915,6 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                     &crate::font::bold(size),
                     range,
                 );
-                let paragraph = NSMutableParagraphStyle::new();
-                paragraph.setLineSpacing(6.0);
-                paragraph.setParagraphSpacingBefore(if source[..span.bytes.start].trim().is_empty() {
-                    0.0
-                } else {
-                    NOTE_HEADING_BEFORE
-                });
-                paragraph.setParagraphSpacing(NOTE_HEADING_AFTER);
-                storage.addAttribute_value_range(NSParagraphStyleAttributeName, &paragraph, range);
             }
             Treatment::Bold => apply_font_trait(&storage, range, NSFontTraitMask::BoldFontMask),
             Treatment::Italic => apply_font_trait(&storage, range, NSFontTraitMask::ItalicFontMask),
@@ -2321,7 +2310,6 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
                 if let Some(frame) =
                     layout_fragment_rect(text, selection.location.saturating_sub(1))
                 {
-                    // A heading fragment includes its 24pt space-before.
                     // Place the placeholder on the text row with the caret.
                     let line_inset = layout_fragment(text, selection.location.saturating_sub(1))
                         .and_then(|fragment| fragment.textLineFragments().firstObject())
