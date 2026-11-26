@@ -156,7 +156,7 @@ impl NoteChip {
             b
         };
         // 미리보기 틀만 뒤의 대화를 흐리게 비춘다. 틀 아래쪽 대화에 가우시안 흐림을 걸고
-        // 거의 불투명한 연보라 면을 얹어, 흰 대화 화면과 다른 판으로 읽히게 한다.
+        // 거의 불투명한 흰 면을 얹어, 연보라 대화 화면과 다른 판(입력창과 이어진 카드)으로 읽히게 한다.
         // 틀의 아래 끝은 입력창 윗선이라 위 모서리만 둥글게 한다. 아래 테두리는 입력창에 가린다.
         let clip = view(rect(0., 0., 300., 200.));
         clip.setWantsLayer(true);
@@ -171,7 +171,7 @@ impl NoteChip {
             }
         }
         if let Some(l) = clip.layer() {
-            let _: () = msg_send![&l, setBackgroundColor: &*suggest_color(0.94, 0.94, 0.99, 0.94).CGColor()];
+            let _: () = msg_send![&l, setBackgroundColor: &*suggest_color(1., 1., 1., 0.92).CGColor()];
             let _: () = msg_send![&l, setBorderColor: &*suggest_color(0.43, 0.42, 0.62, 0.28).CGColor()];
             let _: () = msg_send![&l, setBorderWidth: 0.75f64];
             let _: () = msg_send![&l, setCornerRadius: 16.0f64];

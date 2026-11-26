@@ -182,6 +182,11 @@ impl Messages {
     pub unsafe fn restore(&self, p: NSPoint) {
         self.document.scrollPoint(p);
     }
+    /// 맨 아래까지 내려 마지막 말풍선이 다 보이는지.
+    pub unsafe fn at_bottom(&self) -> bool {
+        let visible = self.scroll.contentView().bounds();
+        visible.origin.y + visible.size.height >= self.document.frame().size.height - 2.
+    }
     pub unsafe fn bottom(&self) {
         self.document.scrollPoint(NSPoint::new(
             0.,
@@ -496,6 +501,8 @@ impl Messages {
             b.label.setFrame(rect(next + 2., bubble_height + 4., 120., 14.));
             y += top + bubble_height + footer + 10.;
         }
+        // 말풍선 사이는 10pt, 마지막 말풍선 아래는 그 절반만 남긴다.
+        if !self.order.is_empty() { y -= 5.; }
         self.document.setFrame(rect(
             0.,
             0.,

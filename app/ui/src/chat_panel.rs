@@ -31,6 +31,65 @@ const INPUT_GROW_MAX: f64 = 360.;
 thread_local! { static INPUT_GROW: Cell<f64> = const { Cell::new(0.) }; }
 thread_local! { static HISTORY_DRAG_HEIGHT: Cell<f64> = const { Cell::new(0.) }; }
 define_class!(
+    /// 입력창 바로 위에서 대화를 흐리게 하는 띠. 눌림과 스크롤은 아래 대화가 받는다.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "StologyChatBottomBlur"]
+    struct BottomBlur;
+
+    unsafe impl NSObjectProtocol for BottomBlur {}
+
+    impl BottomBlur {
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> { None }
+    }
+);
+/// 대화 영역의 바닥. 입력창 윗선(138)보다 6pt 위.
+const MESSAGES_BOTTOM: f64 = 144.;
+/// 입력창 위 흐림 띠 높이.
+const BOTTOM_BLUR_HEIGHT: f64 = 56.;
+
+/// 흐림 층 수. 층마다 약하게 흐리고 아래로 갈수록 짧아져, 입력창 쪽에서 흐림이 겹쳐 진해진다.
+/// 배경 흐림 필터는 레이어 마스크를 따르지 않으므로 그라데이션 대신 층을 겹친다.
+const BOTTOM_BLUR_LAYERS: usize = 7;
+
+fn passthrough_view(frame: NSRect) -> Retained<NSView> {
+    let view: Retained<BottomBlur> = unsafe { msg_send![BottomBlur::alloc(mtm()), initWithFrame: frame] };
+    let view = Retained::into_super(view);
+    view.setAccessibilityElement(false);
+    view
+}
+
+/// 입력창 위 흐림 띠. 안쪽 층들은 `layout_bottom_blur`가 배치한다.
+unsafe fn bottom_blur() -> Retained<NSView> {
+    let band = passthrough_view(rect(0., 0., 300., BOTTOM_BLUR_HEIGHT));
+    band.setWantsLayer(true);
+    for _ in 0..BOTTOM_BLUR_LAYERS {
+        let layer = passthrough_view(rect(0., 0., 300., BOTTOM_BLUR_HEIGHT));
+        layer.setWantsLayer(true);
+        layer.setLayerUsesCoreImageFilters(true);
+        if let Some(class) = AnyClass::get(c"CIFilter") {
+            let blur: Option<Retained<AnyObject>> = msg_send![class, filterWithName: &*NSString::from_str("CIGaussianBlur")];
+            if let Some(blur) = blur {
+                let _: () = msg_send![&blur, setDefaults];
+                let _: () = msg_send![&blur, setValue: &*NSNumber::new_f64(1.6), forKey: &*NSString::from_str("inputRadius")];
+                let _: () = msg_send![&layer, setBackgroundFilters: &*NSArray::from_slice(&[&*blur])];
+            }
+        }
+        band.addSubview(&layer);
+    }
+    band
+}
+
+/// 층 `i`는 바닥에서 띠 높이의 (n - i)/n까지 덮는다. 맨 아래는 모든 층이 겹친다.
+unsafe fn layout_bottom_blur(band: &NSView, width: f64) {
+    let n = BOTTOM_BLUR_LAYERS as f64;
+    for (i, layer) in band.subviews().iter().enumerate() {
+        let height = BOTTOM_BLUR_HEIGHT * (n - i as f64) / n;
+        layer.setFrame(rect(0., 0., width, height));
+    }
+}
+define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     struct HistoryViewport;
@@ -194,6 +253,8 @@ pub struct Panel {
     status_shown: Option<(String, bool)>,
     messages: chat_messages::Messages,
     composer: Retained<NSView>,
+    /// 입력창 위에서 스크롤되는 대화를 흐리게 하는 띠.
+    bottom_blur: Retained<NSView>,
     placeholder: Retained<NSTextField>,
     input: Retained<NSTextView>,
     input_scroll: Retained<NSScrollView>,
@@ -472,6 +533,8 @@ impl Panel {
         }
         let messages = chat_messages::Messages::new();
         view.addSubview(&messages.scroll);
+        let bottom_blur = bottom_blur();
+        view.addSubview(&bottom_blur);
         let composer = theme::chat_composer(rect(12., 30., 316., 140.));
         view.addSubview(&composer);
         let (input_scroll, input) = area(true);
@@ -655,6 +718,7 @@ impl Panel {
             _target: target,
             messages,
             composer,
+            bottom_blur,
             placeholder,
             input,
             input_scroll,
@@ -997,9 +1061,12 @@ impl Panel {
         self.search.setFrame(rect(48., h - 36., (w - 148.).max(0.), 24.));
         self.set_history_frame(false);
         self.status.setFrame(rect(18., h - 69., w - 36., 28.));
-        self.messages.frame(rect(0., 150. + grow, w, (h - 220. - grow).max(80.)));
-        // 노트 칩은 대화 위에 그대로 떠 있다. 흐리게 하는 건 썸네일 줄 뒤뿐이다.
-        self.messages.fade_bottom(if self.attachments.is_empty() { 0. } else { 142. + chip + chat_attachments::STRIP_HEIGHT - 150. });
+        // 대화 바닥은 입력창 윗선(138)에서 6pt 위다.
+        self.messages.frame(rect(0., MESSAGES_BOTTOM + grow, w, (h - 70. - MESSAGES_BOTTOM - grow).max(80.)));
+        self.bottom_blur.setFrame(rect(0., 138. + grow, w, BOTTOM_BLUR_HEIGHT));
+        layout_bottom_blur(&self.bottom_blur, w);
+        self.bottom_blur.setHidden(self.messages.at_bottom());
+        self.shade_messages_bottom();
         self.notice.setFrame(rect(18., 10., w - 36., 16.));
         self.composer.setFrame(rect(12., 34., w - 24., 104. + grow));
         self.input_scroll.setFrame(rect(18., 86., w - 36., 42. + grow));
@@ -1008,6 +1075,24 @@ impl Panel {
         self.bottom.setFrame(rect(w - 126., 146. + grow + strip, 110., 26.));
         self.pause_run.setFrame(rect(16., 146. + grow + strip, 168., 26.));
         self.retry_save.setFrame(rect(if self.waiting.is_some() { 190. } else { 16. }, 146. + grow + strip, 100., 26.));
+    }
+    /// 대화는 입력창 쪽 바닥에서 딱 잘리지 않고 흐려지며 사라진다. 썸네일 줄이 있으면 그 뒤까지.
+    /// 맨 아래까지 내렸으면(흐림 띠가 꺼져 있으면) 마지막 말풍선의 버튼이 또렷하도록 바닥 페이드도 걷는다.
+    /// 노트 칩은 그 위에 그대로 떠 있다.
+    unsafe fn shade_messages_bottom(&self) {
+        let chip = if self.note_chip.visible() { chat_note::CHIP_ROW } else { 0. };
+        let thumbs = if self.attachments.is_empty() { 0. } else { 142. + chip + chat_attachments::STRIP_HEIGHT - MESSAGES_BOTTOM };
+        let edge = if self.bottom_blur.isHidden() { 0. } else { 6. };
+        self.messages.fade_bottom(thumbs.max(edge));
+    }
+    /// 스크롤이 맨 아래에 닿거나 떠날 때 흐림 띠를 끄고 켠다.
+    /// 맨 아래면 새 답변을 이미 보고 있으니 "새 답변" 버튼도 걷어 마지막 말풍선 버튼을 가리지 않게 한다.
+    unsafe fn track_bottom_blur(&self) {
+        let at_bottom = self.messages.at_bottom();
+        if at_bottom && !self.bottom.isHidden() { self.bottom.setHidden(true); }
+        if self.bottom_blur.isHidden() == at_bottom { return; }
+        self.bottom_blur.setHidden(at_bottom);
+        self.shade_messages_bottom();
     }
     unsafe fn add_attachments(&mut self, items: Vec<Result<chat_attachments::Attachment, String>>) {
         if items.is_empty() { return; }
@@ -1197,7 +1282,7 @@ impl Panel {
     fn history_height_bounds(&self) -> (f64, f64) {
         let h = self.size.1;
         let grow = INPUT_GROW.with(Cell::get).min((h - 282.).max(0.));
-        let composer_top = 150. + grow + if self.attachments.is_empty() {
+        let composer_top = MESSAGES_BOTTOM + grow + if self.attachments.is_empty() {
             0.
         } else {
             chat_attachments::STRIP_HEIGHT + 6.
@@ -1443,6 +1528,7 @@ impl Panel {
     }
     pub unsafe fn tick(&mut self, ws: Option<&str>) -> bool {
         self.context(ws);
+        self.track_bottom_blur();
         let mut results = Vec::new();
         if let Some(rx) = &self.models_rx { results.extend(rx.try_iter()); }
         if !results.is_empty() {
