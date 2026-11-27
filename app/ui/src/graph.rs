@@ -1705,6 +1705,14 @@ fn label_candidate(s: &State, i: usize, focus: Option<usize>) -> (i32, Tone, boo
             (-1, Tone::Default, false)
         };
     }
+    // A focused unit names only its own concepts; others speak up only under the pointer.
+    if !s.unit_focus.is_empty() && s.nodes[i].unit.as_deref() != Some(s.unit_focus.as_str()) {
+        return if s.hovered == Some(i) {
+            (96, Tone::Hover, true)
+        } else {
+            (-1, Tone::Default, false)
+        };
+    }
     if s.hits[i] {
         return (80, Tone::Search, false);
     }
@@ -3051,6 +3059,9 @@ mod tests {
             assert!((s.rig.goal.pivot - s.base[a]).length() < 1e-6);
             assert_eq!(s.color_goal[a], s.nodes[a].color);
             assert_ne!(s.color_goal[b], s.nodes[b].color);
+            // Only the focused unit's concepts are label candidates.
+            assert!(label_candidate(&s, a, None).0 >= 0);
+            assert!(label_candidate(&s, b, None).0 < 0);
         });
         select("b");
         STATE.with(|cell| {
