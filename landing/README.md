@@ -1,6 +1,6 @@
 # Stology 소개 사이트 (한국어 · 영어)
 
-Claude·ChatGPT를 이미 결제한 Mac 대학생에게 Stology를 소개하는 독립 정적 사이트다. 한국어 `/`와 영어 `/en/` 두 페이지를 만들고, 기능 소개는 실제 앱 UI를 재현한 브라우저 장면으로 보여 준다. 제품 범위는 [제품 정책](../app/docs/product-policy.md), 노트 기능은 [앱 단축키 문서](../app/docs/keyboard-shortcuts.md)를 기준으로 한다. 타깃·카피·구조·채널 계획과 그 근거는 재구축·마케팅 계획과 벤치마크·채널·도구 조사에 있다.
+AI 공부보다 내 공부를 먼저 하고 싶은 사람에게 Stology를 공부를 위한 에이전트 환경(ASE)으로 소개하는 독립 정적 사이트다. 2026-11-27부터 문구는 발표 자료(stology-deck-draft)의 메시지(세팅은 앱이, 계정·파일은 그대로, AI는 읽기만, 개념 중심 지도, 개발자의 ADE에 대응하는 ASE)에 맞췄다. 통계·수요 근거는 발표용이라 사이트에 싣지 않는다. 한국어 `/`와 영어 `/en/` 두 페이지를 만들고, 기능 소개는 실제 앱 UI를 재현한 브라우저 장면으로 보여 준다. 제품 범위는 [제품 정책](../app/docs/product-policy.md), 노트 기능은 [앱 단축키 문서](../app/docs/keyboard-shortcuts.md)를 기준으로 한다. 타깃·카피·구조·채널 계획과 그 근거는 재구축·마케팅 계획과 벤치마크·채널·도구 조사에 있다.
 
 ## 로컬 실행
 
@@ -52,13 +52,14 @@ VITE_SITE_URL=https://example.com VITE_UMAMI_ID=xxxx npm run build --prefix land
 | [src/analytics.js](src/analytics.js) · [src/config.js](src/config.js) | 분석 래퍼와 배포 상수 |
 | [public/media/](public/media/) · [public/fonts/](public/fonts/) | 실제 앱 이미지, 별 스프라이트, 공식 SUIT 가변 woff2와 [OFL](public/fonts/OFL.txt) |
 | [scripts/check-catalog.mjs](scripts/check-catalog.mjs) | 정적 검사 |
+| [scripts/og/render.html](scripts/og/render.html) | 공유 미리보기 `public/og-ko.png`·`og-en.png` 렌더러. `landing/`을 정적 서버로 열고 `?lang=ko\|en`을 1200×630 뷰포트에서 캡처한 뒤 1200×630으로 줄인다. `src-*.png`는 옛 미리보기 원본으로, 글자 영역을 배경으로 메운 뒤 새 문구를 얹는다 |
 | [qa/](qa/) | 브라우저 검증 스크립트와 화면 |
 
 한국어 문구는 `humanize-korean` 윤문을 한 번 거쳤다(2026-11-24, 변경률 0.1%). 런타임 UI 프레임워크 없이 Vite로 묶은 HTML·CSS·JavaScript다. 히어로와 06 과목 지도의 지도 부분은 Canvas 2D, 나머지 기능 시연은 DOM/CSS다. 외부 라이브러리·WebGL은 쓰지 않는다. 영상 파일은 마무리 섹션의 소개 영상 하나뿐이다(ADR-041).
 
 ### 페이지 순서
 
-히어로(은하수 고정, 신뢰 사실 네 개) → 01 한 화면(앱 창 전체 20초 루프: PDF 열기 → 형광펜 → AI 질문 ⌘↩ → 노트로 정리) → 02 지금은(중립 창 세 개가 하나로 합쳐지는 문제 제기) → 03 세 가지 약속 → 04 노트(핵심 6 · 모두 16) → 05 PDF 필기(핵심 5 · 모두 13) → 06 과목 지도(지식지도 조작 장면, 약 23초 반복) → 07 시작하기 세 단계 → 08 FAQ → 마무리(35초 소개 영상 · 문구 · 다운로드) → 푸터(릴리스 노트·Discord·데이터 안내). 가격·요금제는 적지 않는다(사용자 결정).
+히어로(은하수 고정, 신뢰 사실 네 개) → 01 한 화면(앱 창 전체 20초 루프: PDF 열기 → 형광펜 → AI 질문 ⌘↩ → 노트로 정리) → 02 지금은(직접 세팅하는 부담을 적은 중립 창 세 개가 하나로 합쳐지는 문제 제기) → 03 세 가지 약속(쓰던 계정 그대로 · 스킬과 지침은 Stology가 · AI는 읽기만, 파일은 내 Mac에) → 04 노트(핵심 6 · 모두 16) → 05 PDF 필기(핵심 5 · 모두 13) → 06 과목 지도(지식지도 조작 장면, 약 23초 반복) → 07 시작하기 세 단계 → 08 FAQ → 마무리(35초 소개 영상 · 문구 · 다운로드) → 푸터(릴리스 노트·Discord·데이터 안내). 가격·요금제는 적지 않는다(사용자 결정).
 
 ### 기능 시연 장면
 

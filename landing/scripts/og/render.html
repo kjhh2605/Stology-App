@@ -1,0 +1,53 @@
+<!doctype html>
+<!-- 공유 미리보기(og-ko.png·og-en.png) 렌더러. landing/scripts/og 를 정적 서버로 열고 ?lang=ko|en 으로 1200×630 뷰포트에서 캡처한다.
+     src-*.png 는 2026-11-27 이전 미리보기 원본이다. 왼쪽 글자 영역은 테두리 색으로 메우고(Coons 보간) 그 위에 새 문구를 얹는다. -->
+<html><head><meta charset="utf-8">
+<style>
+@font-face{font-family:SUIT;src:url(../../public/fonts/SUIT-Variable.woff2) format('woff2');font-weight:100 900}
+html,body{margin:0;background:#08090d}
+.og{position:relative;width:1200px;height:630px;overflow:hidden;font-family:SUIT,sans-serif;color:#f4f2fa}
+canvas{position:absolute;inset:0}
+.copy{position:absolute;left:73px;top:196px}
+h1{margin:0;font-weight:500;font-size:68px;line-height:1.24;letter-spacing:-2.6px;white-space:nowrap}
+h1 span{background:linear-gradient(110deg,#d9d5ff,#9c8dff 80%);-webkit-background-clip:text;background-clip:text;color:transparent}
+p{margin:34px 0 0;white-space:nowrap;font-size:20px;line-height:1.7;color:#aaa8b9;word-break:keep-all;letter-spacing:-.2px}
+.req{position:absolute;left:73px;top:555px;font-size:15px;color:#8d8a9a}
+</style></head><body>
+<div class="og"><canvas width="1200" height="630"></canvas><div class="copy"><h1></h1><p></p></div><div class="req"></div></div>
+<script>
+const COPY = {
+  ko: { t: 'AI 공부보다,', a: '내 공부를 먼저.', p: ['쓰던 Claude·ChatGPT·Google 계정 그대로, 세팅은 Stology가.', '강의 PDF 필기, 노트, 질문, 과목 지도를 Mac 창 하나에서.'], r: 'Apple Silicon Mac · macOS 14 이상 · 0.1.3' },
+  en: { t: 'Skip studying AI.', a: 'Study your course.', p: ['Your Claude, ChatGPT, or Google account, set up by Stology.', 'Lecture PDFs, notes, questions, and a course map, one window.'], r: 'Apple Silicon Mac · macOS 14 or later · 0.1.3 · Korean interface' },
+};
+const lang = new URLSearchParams(location.search).get('lang') === 'en' ? 'en' : 'ko';
+const c = COPY[lang];
+document.querySelector('h1').innerHTML = `${c.t}<br><span>${c.a}</span>`;
+document.querySelector('.copy p').innerHTML = c.p.map(l => l.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]))).join('<br>');
+document.querySelector('.req').textContent = c.r;
+const img = new Image();
+img.onload = () => {
+  const cv = document.querySelector('canvas'), g = cv.getContext('2d');
+  g.drawImage(img, 0, 0, 1200, 630);
+  // 지울 영역: 옛 제목·본문·요구사항 줄. 로고(위)와 S 은하수(오른쪽)는 건드리지 않는다.
+  const X0 = 50, X1 = 706, Y0 = 168, Y1 = 598;
+  const d = g.getImageData(0, 0, 1200, 630), px = d.data;
+  const at = (x, y) => { const i = (y * 1200 + x) * 4; return [px[i], px[i + 1], px[i + 2]]; };
+  // 테두리 바로 바깥을 따라 중앙값으로 별·반짝이를 걷어낸 색 줄
+  const med = arr => { const s = [...arr].sort((a, b) => a - b); return s[s.length >> 1]; };
+  const line = (n, f) => { const raw = Array.from({ length: n }, (_, k) => f(k)); return raw.map((_, k) => { const w = raw.slice(Math.max(0, k - 12), k + 13); return [0, 1, 2].map(ch => med(w.map(v => v[ch]))); }); };
+  const W = X1 - X0, H = Y1 - Y0;
+  const T = line(W + 1, k => at(X0 + k, Y0 - 2)), B = line(W + 1, k => at(X0 + k, Y1 + 2));
+  const L = line(H + 1, k => at(X0 - 2, Y0 + k)), R = line(H + 1, k => at(X1 + 2, Y0 + k));
+  for (let y = 0; y <= H; y++) for (let x = 0; x <= W; x++) {
+    const u = x / W, v = y / H, i = ((Y0 + y) * 1200 + X0 + x) * 4;
+    for (let ch = 0; ch < 3; ch++) {
+      const val = (1 - v) * T[x][ch] + v * B[x][ch] + (1 - u) * L[y][ch] + u * R[y][ch]
+        - ((1 - u) * (1 - v) * T[0][ch] + u * (1 - v) * T[W][ch] + (1 - u) * v * B[0][ch] + u * v * B[W][ch]);
+      px[i + ch] = Math.max(0, Math.min(255, val + (Math.random() - .5) * 1.5));
+    }
+  }
+  g.putImageData(d, 0, 0);
+  document.fonts.ready.then(() => { document.body.dataset.ready = '1'; });
+};
+img.src = `src-${lang}.png`;
+</script></body></html>
