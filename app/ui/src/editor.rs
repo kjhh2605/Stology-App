@@ -163,6 +163,74 @@ fn code_selection(source: &str, selection: NSRange) -> Option<NSRange> {
 }
 
 define_class!(
+    /// Transparent layer above the note's selection highlight that draws list
+    /// numbers, bullets and quote bars from the editor's last styling pass.
+    #[unsafe(super(NSView, NSResponder))]
+    #[name = "StologyMarkOverlay"]
+    #[thread_kind = MainThreadOnly]
+    struct MarkOverlay;
+    impl MarkOverlay {
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> *mut NSView { std::ptr::null_mut() }
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool { true }
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _rect: NSRect) { unsafe {
+            let Some(editor) = self.superview().and_then(|v| v.downcast::<MarkdownEditor>().ok()) else { return };
+            // Empty lines at the end of the note stay selected (Cmd+A still
+            // deletes them) but are not shown as highlighted below the content.
+            let selection: NSRange = msg_send![&*editor, selectedRange];
+            if selection.length > 0 {
+                let source = editor.string().to_string();
+                let tail = trailing_blank_start(&source);
+                let tail_utf16 = utf16_offset(&source, tail);
+                if tail < source.len() && selection.location < tail_utf16 && selection.location + selection.length > tail_utf16 {
+                    if let Some(frame) = layout_fragment_rect(&editor, tail_utf16) {
+                        let bounds = self.bounds();
+                        editor.backgroundColor().setFill();
+                        NSBezierPath::bezierPathWithRect(NSRect::new(
+                            NSPoint::new(0.0, frame.origin.y),
+                            NSSize::new(bounds.size.width, (bounds.size.height - frame.origin.y).max(0.0)),
+                        )).fill();
+                    }
+                }
+            }
+            NSColor::separatorColor().setFill();
+            for frame in editor.ivars().rule_bars.borrow().iter() {
+                NSBezierPath::bezierPathWithRect(*frame).fill();
+            }
+            let color = NSColor::secondaryLabelColor();
+            let mono = NSFont::monospacedSystemFontOfSize_weight(12.0, 0.0);
+            let attrs = NSDictionary::from_slices(&[NSFontAttributeName, NSForegroundColorAttributeName], &[&*mono as &AnyObject, &*color as &AnyObject]);
+            for (number, point) in editor.ivars().line_numbers.borrow().iter() {
+                NSString::from_str(number).drawAtPoint_withAttributes(*point, Some(&attrs));
+            }
+            for (label, point, size) in editor.ivars().list_labels.borrow().iter() {
+                let font = crate::font::regular(*size);
+                let attrs = NSDictionary::from_slices(&[NSFontAttributeName, NSForegroundColorAttributeName], &[&*font as &AnyObject, &*color as &AnyObject]);
+                NSString::from_str(label).drawAtPoint_withAttributes(*point, Some(&attrs));
+            }
+            NSColor::colorWithSRGBRed_green_blue_alpha(0.48, 0.49, 0.54, 1.0).setFill();
+            for bar in editor.ivars().quote_bars.borrow().iter() {
+                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(*bar, 1.5, 1.5).fill();
+            }
+        }}
+    }
+);
+/// The editor's mark overlay, created on first use and kept covering the text.
+unsafe fn mark_overlay(text: &NSTextView) -> Retained<MarkOverlay> {
+    let existing = text.subviews().into_iter().find_map(|v| v.downcast::<MarkOverlay>().ok());
+    let overlay = existing.unwrap_or_else(|| {
+        let allocated = MarkOverlay::alloc(MainThreadMarker::new_unchecked());
+        let view: Retained<MarkOverlay> = msg_send![allocated, initWithFrame: text.bounds()];
+        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+        text.addSubview(&view);
+        view
+    });
+    overlay.setFrame(text.bounds());
+    overlay
+}
+define_class!(
     #[unsafe(super(NSTextField, NSControl, NSView, NSResponder))]
     #[name = "StologyHeadingPlaceholder"]
     #[thread_kind = MainThreadOnly]
@@ -576,25 +644,9 @@ define_class!(
                 NSColor::controlAccentColor().setFill();
                 NSBezierPath::bezierPathWithRect(NSRect::new(NSPoint::new(EDITOR_INSET, y), NSSize::new(self.bounds().size.width - 2. * EDITOR_INSET, 2.))).fill();
             }
-            NSColor::separatorColor().setFill();
-            for frame in self.ivars().rule_bars.borrow().iter() {
-                NSBezierPath::bezierPathWithRect(*frame).fill();
-            }
-            let font = NSFont::monospacedSystemFontOfSize_weight(12.0, 0.0);
-            let color = NSColor::secondaryLabelColor();
-            let attrs = NSDictionary::from_slices(&[NSFontAttributeName, NSForegroundColorAttributeName], &[&*font as &AnyObject, &*color as &AnyObject]);
-            for (number, point) in self.ivars().line_numbers.borrow().iter() {
-                NSString::from_str(number).drawAtPoint_withAttributes(*point, Some(&attrs));
-            }
-            for (label, point, size) in self.ivars().list_labels.borrow().iter() {
-                let font = crate::font::regular(*size);
-                let attrs = NSDictionary::from_slices(&[NSFontAttributeName, NSForegroundColorAttributeName], &[&*font as &AnyObject, &*color as &AnyObject]);
-                NSString::from_str(label).drawAtPoint_withAttributes(*point, Some(&attrs));
-            }
-            NSColor::colorWithSRGBRed_green_blue_alpha(0.48, 0.49, 0.54, 1.0).setFill();
-            for bar in self.ivars().quote_bars.borrow().iter() {
-                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(*bar, 1.5, 1.5).fill();
-            }
+            // Rules, code line numbers, list labels and quote bars are drawn by
+            // MarkOverlay so the selection highlight, painted above this
+            // background, cannot hide them.
         }}
         #[unsafe(method(didChangeText))]
         fn did_change_text(&self) { unsafe {
@@ -1504,6 +1556,11 @@ fn active_block(source: &str, selection: NSRange) -> Range<usize> {
         byte
     };
     let final_block = paragraph_block_at(source, last_character);
+    // A selection across blocks (Select All, a long drag) is for copying or
+    // deleting, not for editing one block: keep every block rendered.
+    if last > byte && (final_block.start >= first.end || (byte == 0 && last >= source.len())) {
+        return byte..byte;
+    }
     first.start..final_block.end
 }
 fn paragraph_block_at(source: &str, position: usize) -> Range<usize> {
@@ -1643,6 +1700,35 @@ unsafe fn conceal_editable_syntax(storage: &objc2_foundation::NSMutableAttribute
             range,
         );
     }
+}
+
+/// Byte offset where the note's trailing run of blank lines begins
+/// (the source length when the last line has content).
+fn trailing_blank_start(source: &str) -> usize {
+    let mut start = 0;
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        offset += line.len();
+        if !line.trim().is_empty() {
+            start = offset;
+        }
+    }
+    start
+}
+/// Byte range of each line's last character through its line ending.
+fn line_tail_ranges(source: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        if let Some((last, _)) = body.char_indices().next_back() {
+            ranges.push(offset + last..offset + line.len());
+        } else if !line.is_empty() {
+            ranges.push(offset..offset + line.len());
+        }
+        offset += line.len();
+    }
+    ranges
 }
 
 fn hidden_syntax(source: &str, active: Option<&Range<usize>>) -> Vec<Range<usize>> {
@@ -2152,6 +2238,11 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
         offset += line.len();
     }
     storage.addAttribute_value_range(NSKernAttributeName, &objc2_foundation::NSNumber::new_f64(0.2), all);
+    // Spacing after a line's last character leaves a hairline gap between the
+    // text's selection highlight and the highlight that runs to the line end.
+    for range in line_tail_ranges(&source) {
+        storage.removeAttribute_range(NSKernAttributeName, utf16_range(&source, range));
+    }
     storage.addAttribute_value_range(NSForegroundColorAttributeName, &ink, all);
     let blocks = markdown_shortcuts::blocks(&source);
     for block in blocks.iter().filter(|block| block.quote_depth > 0) {
@@ -2625,6 +2716,7 @@ unsafe fn render_markdown(text: &NSTextView, base_directory: Option<&Path>, prev
             }
         }
         text.setNeedsDisplay(true);
+        if native.is_some() { mark_overlay(text).setNeedsDisplay(true); }
         for (event, bytes) in Parser::new_ext(&source, Options::ENABLE_TASKLISTS).into_offset_iter()
         {
             let Event::TaskListMarker(checked) = event else {
@@ -3730,6 +3822,34 @@ mod tests {
             NSRange::new(source[..byte].encode_utf16().count(), 0),
         );
         assert!(active.is_empty());
+    }
+    #[test]
+    fn trailing_blank_lines_start_after_last_content_line() {
+        assert_eq!(trailing_blank_start("본문\n\n---\n\n\n"), "본문\n\n---\n".len());
+        assert_eq!(trailing_blank_start("본문\r\n  \r\n"), "본문\r\n".len());
+        assert_eq!(trailing_blank_start("본문"), "본문".len());
+        assert_eq!(trailing_blank_start("\n\n"), 0);
+    }
+    #[test]
+    fn line_tails_cover_last_character_and_line_ending() {
+        let source = "가나\r\n\nROE 😀\n끝";
+        let tails: Vec<&str> = line_tail_ranges(source).into_iter().map(|r| &source[r]).collect();
+        assert_eq!(tails, ["나\r\n", "\n", "😀\n", "끝"]);
+    }
+    #[test]
+    fn multi_block_or_whole_selection_keeps_formatting() {
+        let source = "# 제목\n\n**굵게** 문단\n\n- 항목";
+        let all = NSRange::new(0, source.encode_utf16().count());
+        let active = active_block(source, all);
+        assert!(active.is_empty());
+        let hidden = hidden_syntax(source, Some(&active));
+        assert!(hidden.iter().any(|r| &source[r.clone()] == "# "));
+        assert!(hidden.iter().any(|r| &source[r.clone()] == "**"));
+        let single = "**굵게** 문단";
+        assert!(active_block(single, NSRange::new(0, single.encode_utf16().count())).is_empty());
+        let start = source[..source.find("굵게").unwrap()].encode_utf16().count();
+        let inside = active_block(source, NSRange::new(start, 2));
+        assert!(source[inside].starts_with("**굵게**"));
     }
     #[test]
     fn syntax_stays_concealed_while_heading_is_edited() {
