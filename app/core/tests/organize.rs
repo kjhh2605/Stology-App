@@ -145,6 +145,10 @@ fn subject_is_read_in_chunks_aligned_connected_and_published_once() {
     assert_eq!(g["concepts"].as_array().unwrap().len(), 7);
     let jwt = g["concepts"].as_array().unwrap().iter().find(|c| c["merged"].as_array().is_some_and(|m| !m.is_empty())).unwrap();
     assert_eq!(jwt["materials"].as_array().unwrap().len(), 2);
+    // Each merged member names the material it came from, which is not the representative's.
+    let member = &jwt["merged"].as_array().unwrap()[0]["materials"];
+    assert_eq!(member.as_array().unwrap().len(), 1, "{member}");
+    assert!(jwt["materials"].as_array().unwrap().contains(&member[0]));
     assert_eq!(g["units"].as_array().unwrap().len(), 2);
     let links = g["assertions"].as_array().unwrap();
     assert_eq!(links.iter().filter(|l| l["basis"] == "written").count(), 4);

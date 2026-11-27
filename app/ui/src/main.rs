@@ -326,6 +326,7 @@ enum Action {
     DeleteLink(Value),
     HideLink(Value, bool),
     Unmerge(String),
+    ToggleMerged,
     RestoreDescription(String),
     Reread(String, String),
     /// 정리 제안: register · edit · ask_dismiss · dismiss · draft, 그리고 제안 ID.
@@ -469,6 +470,7 @@ struct State {
     node_limit: usize,
     expanded_link: String,
     neighbor_limit: usize,
+    merged_open: bool,
     desc_field: Option<Retained<NSTextField>>,
     desc_hint: Option<Retained<NSTextField>>,
     desc_concept: String,
@@ -1779,6 +1781,17 @@ impl State {
             } else {
                 NSAutoresizingMaskOptions::empty()
             });
+        }
+    }
+    /// 펼치기·접기처럼 카드 내용만 바뀔 때는 다시 그려도 보던 위치(맨 위에서 내려온 거리)를 유지한다.
+    unsafe fn refresh_right_in_place(&mut self) {
+        let offset = find_scroll(&self.right)
+            .and_then(|s| s.documentView().map(|v| v.frame().size.height - s.contentView().bounds().origin.y));
+        self.refresh_right();
+        if let (Some(offset), Some(scroll)) = (offset, find_scroll(&self.right)) {
+            if let Some(view) = scroll.documentView() {
+                view.scrollPoint(NSPoint::new(0., view.frame().size.height - offset));
+            }
         }
     }
     unsafe fn refresh_right(&mut self) {
@@ -3946,6 +3959,7 @@ impl State {
         self.nodes_open = true;
         self.node_limit = 40;
         self.neighbor_limit = 8;
+        self.merged_open = false;
         if let Some(pref) = self
             .workspace
             .as_ref()
@@ -4408,15 +4422,46 @@ impl State {
                 let merged = concept["merged"].as_array().cloned().unwrap_or_default();
                 if !merged.is_empty() {
                     list.addSubview(&theme::soft_divider(rect(14., y - 10., w - 28., 1.), true));
-                    y -= 42.;
-                    self.section(&list, "tag", "하나로 합친 이름", 16., y, inner, 11.);
-                    y -= 6.;
-                    for m in &merged {
-                        wrapped(&list, &strv(m, "name"), 20., &mut y, w - 40., 11.5, true, 1);
-                        wrapped(&list, &strv(m, "definition"), 20., &mut y, w - 40., 10.5, false, 2).setTextColor(Some(&NSColor::secondaryLabelColor()));
-                        y -= 24.;
-                        let b = self.glass(&list, "따로 떼기", rect(w - 16. - 110., y, 110., 24.), Action::Unmerge(strv(m, "id")), theme::Glass::Clear, None);
-                        y -= 8.;
+                    y -= 20.;
+                    // 자료마다 같은 이름으로 나온 개념을 합친 경우가 많아 이름 대신 출처 자료로 구별한다.
+                    let key = |t: &str| t.split_whitespace().collect::<String>().to_lowercase();
+                    let name = strv(&concept, "name");
+                    let renamed = merged.iter().filter(|m| key(&strv(m, "name")) != key(&name)).count();
+                    let summary = if renamed == 0 {
+                        format!("같은 이름 {}개를 하나로 합침", merged.len() + 1)
+                    } else {
+                        format!("{}개를 하나로 합침 · 다른 이름 {renamed}개", merged.len() + 1)
+                    };
+                    y -= 28.;
+                    let b = self.glass(&list, &format!("{summary}  {}", if self.merged_open { "▾" } else { "▸" }), rect(16., y, inner, 28.), Action::ToggleMerged, theme::Glass::Clear, Some("tag"));
+                    b.setAlignment(NSTextAlignment::Left);
+                    b.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+                    y -= 8.;
+                    if self.merged_open {
+                        for m in &merged {
+                            let titles: Vec<String> = m["materials"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .map(|id| place_title(&self.graph_data, id))
+                                .filter(|t| !t.is_empty())
+                                .collect();
+                            let from = if titles.is_empty() { "출처 자료 없음".to_owned() } else { titles.join(" · ") };
+                            let member = strv(m, "name");
+                            let head = if key(&member) == key(&name) { from.clone() } else { member };
+                            let top = y;
+                            // 따로 떼기는 제목 줄 오른쪽의 작은 버튼으로 두어 항목마다 한 줄을 더 쓰지 않는다.
+                            wrapped(&list, &head, 20., &mut y, w - 40. - 92., 11.5, true, 2);
+                            let below = y;
+                            let b = self.glass(&list, "따로 떼기", rect(w - 16. - 84., top - 22., 84., 22.), Action::Unmerge(strv(m, "id")), theme::Glass::Clear, None);
+                            b.setFont(Some(&font::regular(10.5)));
+                            y = below.min(top - 27.);
+                            if head != from {
+                                wrapped(&list, &from, 20., &mut y, w - 40., 10.5, false, 2).setTextColor(Some(&NSColor::secondaryLabelColor()));
+                            }
+                            wrapped(&list, &strv(m, "definition"), 20., &mut y, w - 40., 10.5, false, 2).setTextColor(Some(&NSColor::secondaryLabelColor()));
+                            y -= 8.;
+                        }
                     }
                 }
             } else if !link {
@@ -4709,6 +4754,7 @@ impl State {
                 | Action::ToggleNodes
                 | Action::MoreNodes
                 | Action::MoreNeighbors
+                | Action::ToggleMerged
                 | Action::Import
                 | Action::Cancel
                 | Action::Connect
@@ -4955,12 +5001,8 @@ impl State {
             }
             Action::Inert => {}
             Action::ExpandLink(id) => {
-                let offset = find_scroll(&self.right).map(|s| s.documentView().unwrap().frame().size.height - s.contentView().bounds().origin.y);
                 self.expanded_link = id;
-                self.refresh_right();
-                if let (Some(offset),Some(scroll)) = (offset,find_scroll(&self.right)) {
-                    if let Some(view) = scroll.documentView() {view.scrollPoint(NSPoint::new(0.,view.frame().size.height-offset));}
-                }
+                self.refresh_right_in_place();
             }
             Action::CleanupReview => self.start_cleanup(),
             Action::DeleteLink(link) => {
@@ -5105,6 +5147,10 @@ impl State {
                 self.node_limit += 40;
                 self.refresh_right();
             }
+            Action::ToggleMerged => {
+                self.merged_open = !self.merged_open;
+                self.refresh_right_in_place();
+            }
             Action::MoreNeighbors => {
                 self.neighbor_limit = if self.neighbor_limit == 8 {
                     usize::MAX.min(
@@ -5116,7 +5162,7 @@ impl State {
                 } else {
                     8
                 };
-                self.refresh_right();
+                self.refresh_right_in_place();
             }
             Action::Relation => {
                 if let Some(p) = &self.relation {
@@ -5375,6 +5421,7 @@ impl State {
             if selection != self.selection {
                 self.selection = selection;
                 self.neighbor_limit = 8;
+                self.merged_open = false;
                 self.refresh_relation_options();
                 self.refresh_right();
             }
@@ -6013,6 +6060,7 @@ fn main() {
             node_limit: 40,
             expanded_link: String::new(),
             neighbor_limit: 8,
+            merged_open: false,
             desc_field: None,
             desc_hint: None,
             desc_concept: String::new(),

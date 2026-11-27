@@ -191,7 +191,17 @@ pub(crate) fn view(c: &Connection, root: &Path, w: &str) -> Result<Value> {
     // Written links: the materials' claims, between subject concepts, by kind.
     let mut written: BTreeMap<(String, String, String, String, bool), Value> = BTreeMap::new();
     let mut learned: HashMap<String, Vec<Value>> = HashMap::new();
+    // Materials each lower concept came from, so merged members can be told apart by source.
+    let mut member_materials: HashMap<String, Vec<String>> = HashMap::new();
     for a in lower["assertions"].as_array().into_iter().flatten() {
+        for raw in [&a["subject"], &a["object"]] {
+            let seen = member_materials.entry(raw.as_str().unwrap_or("").to_owned()).or_default();
+            for m in a["evidence"].as_array().into_iter().flatten().filter_map(|e| e["material_id"].as_str()) {
+                if !seen.iter().any(|x| x == m) {
+                    seen.push(m.to_owned());
+                }
+            }
+        }
         let (s, o) = (upper(a["subject"].as_str().unwrap_or("")), upper(a["object"].as_str().unwrap_or("")));
         for id in [&s, &o] {
             learned.entry(id.clone()).or_default().extend(a["evidence"].as_array().cloned().unwrap_or_default());
@@ -272,7 +282,7 @@ pub(crate) fn view(c: &Connection, root: &Path, w: &str) -> Result<Value> {
             seen
         };
         let low = !materials.is_empty() && materials.iter().all(|m| quality.get(*m).is_some_and(|q| q == "low"));
-        let merged: Vec<Value> = group.iter().filter(|m| m["id"] != id.as_str()).map(|m| json!({"id":m["id"],"name":m["name"],"definition":m["definition"]})).collect();
+        let merged: Vec<Value> = group.iter().filter(|m| m["id"] != id.as_str()).map(|m| json!({"id":m["id"],"name":m["name"],"definition":m["definition"],"materials":member_materials.get(m["id"].as_str().unwrap_or("")).cloned().unwrap_or_default()})).collect();
         concepts.push(json!({"id":id,"name":name,"aliases":aliases,"definition":definition,"original_definition":original,"edited":edited.is_some(),"kind":first["kind"],"kind_label":concept_kind_label(first["kind"].as_str().unwrap_or("")),"unit":unit,"merged":merged,"low_quality":low,"materials":materials,"learned":evidence}));
     }
     concepts.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
