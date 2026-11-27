@@ -334,6 +334,8 @@ enum Action {
     SuggestToggle,
     SuggestClose,
     SuggestIntroSeen,
+    /// 누를 수 없는 행. 개념 패널의 연결 문장처럼 우클릭 메뉴만 있는 버튼에 쓴다.
+    Inert,
 }
 struct Pending {
     receiver: mpsc::Receiver<Result<Value, String>>,
@@ -4339,7 +4341,6 @@ impl State {
                     self.section(&list, "link", &format!("연결 {}개", links.len()), 16., y, inner, 11.);
                     y -= 6.;
                     for l in links.iter().take(self.neighbor_limit) {
-                        let other = if l["subject"] == sid.as_str() { strv(l, "object") } else { strv(l, "subject") };
                         // 같은 두 개념이 조건만 달리 여러 번 이어질 수 있어 조건을 함께 보여 준다.
                         let sentence = match l["condition"].as_str().filter(|c| !c.is_empty()) {
                             Some(condition) => format!("{} (조건: {condition})", strv(l, "sentence")),
@@ -4355,7 +4356,8 @@ impl State {
                             measure.cell().map(|c| c.cellSizeForBounds(rect(0.,0.,inner-49.,100000.)).height.ceil()+10.).unwrap_or(28.).max(28.)
                         } else {28.};
                         y -= height;
-                        let b = self.glass(&list, &sentence, rect(16., y, inner, height), Action::Node(other), theme::Glass::Clear, Some(if dashed { "link" } else { "orb" }));
+                        // 연결 문장은 눌러도 이웃 개념으로 이동하지 않는다. 잘린 문장만 눌러 펼친다.
+                        let b = self.glass(&list, &sentence, rect(16., y, inner, height), Action::Inert, theme::Glass::Clear, Some(if dashed { "link" } else { "orb" }));
                         b.setAlignment(NSTextAlignment::Left);
                         if expanded {
                             b.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
@@ -4951,6 +4953,7 @@ impl State {
                 self.selection = graph::selection().unwrap_or(Value::Null);
                 self.refresh_right();
             }
+            Action::Inert => {}
             Action::ExpandLink(id) => {
                 let offset = find_scroll(&self.right).map(|s| s.documentView().unwrap().frame().size.height - s.contentView().bounds().origin.y);
                 self.expanded_link = id;
