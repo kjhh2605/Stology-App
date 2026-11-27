@@ -3,13 +3,28 @@
     <channel>
         <title>Stology Local</title>
         <item>
+            <title>0.1.5</title>
+            <pubDate>Fri, 27 Nov 2026 22:09:05 +0900</pubDate>
+            <sparkle:version>6</sparkle:version>
+            <sparkle:shortVersionString>0.1.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.5/Stology-Local-0.1.5-arm64.dmg" length="13034986" type="application/octet-stream" sparkle:edSignature="AUypJAh2ZBDfZE+M1mDSKCFTXXRQ4yXmdtueEjjeFSY3scVza6SFdjuu4qt0sKuWayC6cvq8dCZb+1jTOmZGCw=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.5/Stology%20Local6-5.delta" sparkle:deltaFrom="5" length="221846" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="yZvT8eV4XR3kwJ2jaxxMc/VnAS4ysb388GinKWqwydfM+9mImPpR6sJwDGbTnuuKRx79m+k44vrnHKhJiFSlAw=="/>
+                <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.5/Stology%20Local6-4.delta" sparkle:deltaFrom="4" length="778114" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="DtB5JPEzslveHj9tfhfwf5bSYLWLrhTjJb7ioyaL6fqRXRr46C5hTBn7jof9swQoItuXIvvBvwS2qxpDMeSWCQ=="/>
+                <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.5/Stology%20Local6-3.delta" sparkle:deltaFrom="3" length="1207762" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="UydOaOKWjhhhakXVPdVf95OrPLypzHqUyJw+/CSFD7CgoryvNtECuY8Vr0S6bYXIKUZ9IWjBxg22f+DxmZxDCQ=="/>
+                <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.5/Stology%20Local6-2.delta" sparkle:deltaFrom="2" length="1207626" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="jidF4tCz9eIhhC7MmiXhUdfCy8hJv7XlAR92SsemIn+6s97gof7j9IjJ74x5Ucg4mxnaQ7lTzoPhBBd5G/8ABw=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>0.1.4</title>
             <pubDate>Fri, 27 Nov 2026 13:12:31 +0900</pubDate>
             <sparkle:version>5</sparkle:version>
             <sparkle:shortVersionString>0.1.4</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.4/Stology-Local-0.1.4-arm64.dmg" length="13030956" type="application/octet-stream" sparkle:edSignature="I6cODj/B0rPij84/WCjh9mxHOU3HhJn2k7JBNmagpDH6FSk9jEMLCieurovkwRV9NJbJkmBC375rK3odRuqTDw=="/>
+            <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.5/Stology-Local-0.1.4-arm64.dmg" length="13030956" type="application/octet-stream" sparkle:edSignature="I6cODj/B0rPij84/WCjh9mxHOU3HhJn2k7JBNmagpDH6FSk9jEMLCieurovkwRV9NJbJkmBC375rK3odRuqTDw=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.4/Stology%20Local5-4.delta" sparkle:deltaFrom="4" length="760418" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="K4kwCqZsQ9LGhgtg+UqUyBhxNv7V42k0R4DU2aEhERaG5sIhC424AraEQWhUv8ez2x0x3bv9btgQSungvOZlDg=="/>
                 <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.4/Stology%20Local5-3.delta" sparkle:deltaFrom="3" length="1206026" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="FIgbshVN9wzN8iThfy76QgGC+JMlM7+8jKK7yNyWiZ/S9pKIFXRjkYnYeRm0b/iIPPomFGxinlRJB+7FqzZCAQ=="/>
@@ -23,22 +38,10 @@
             <sparkle:shortVersionString>0.1.3</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.4/Stology-Local-0.1.3-arm64.dmg" length="12294741" type="application/octet-stream" sparkle:edSignature="XD3Fp0ej5KE6oxFlvc+XycqcG/OX12TQZJStUEHDLDRvrDWka/UAMGi8LGzSyExCeUy79o4ivkV/i2f5sOHaAg=="/>
+            <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.5/Stology-Local-0.1.3-arm64.dmg" length="12294741" type="application/octet-stream" sparkle:edSignature="XD3Fp0ej5KE6oxFlvc+XycqcG/OX12TQZJStUEHDLDRvrDWka/UAMGi8LGzSyExCeUy79o4ivkV/i2f5sOHaAg=="/>
             <sparkle:deltas>
                 <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.3/Stology-Local4-3.delta" sparkle:deltaFrom="3" length="1132234" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="QJr8oaaU33I4EZhs70fbV8AbMQuwr7psxi0VjgMrdsP86JRh67g7lgGc5DIRj7wtTXg/Q+fzJV/2LJ3cXeXfCA=="/>
                 <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.3/Stology-Local4-2.delta" sparkle:deltaFrom="2" length="1132630" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="pSZjnv3ee910HMUo0BFvjY+BP0QEFpifSAwncUKFBzq2snRjA/1T5/gqUslNZPpTeN2ikrL9tS5m9h6ewrl9Aw=="/>
-            </sparkle:deltas>
-        </item>
-        <item>
-            <title>0.1.2</title>
-            <pubDate>Wed, 25 Nov 2026 19:05:55 +0900</pubDate>
-            <sparkle:version>3</sparkle:version>
-            <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.4/Stology-Local-0.1.2-arm64.dmg" length="12085610" type="application/octet-stream" sparkle:edSignature="F6uAoOczhVivz5QkBLtS/yPZnITCIdWKENP989zIgxnd9vUpJRXb1ja6RSM5p8G2D8N2Hu1K+r1pz3Nni3uQBg=="/>
-            <sparkle:deltas>
-                <enclosure url="https://github.com/kjhh2605/Stology-App/releases/download/v0.1.2/Stology%20Local3-2.delta" sparkle:deltaFrom="2" length="179758" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="gbw0aPz3B/4E28wMFF19P8uvUofgRRWmicm+F3ap5wCJH/nIjjoX2vwC+vIYE7JmbcMZqiSfkH4tj5x7vk/FAw=="/>
             </sparkle:deltas>
         </item>
     </channel>
