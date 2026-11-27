@@ -1998,6 +1998,39 @@ impl State {
     /// 질문 위 이름표: 그 노트를 열고 붙였던 블록을 골라 보여 준다.
     unsafe fn reveal_note(&mut self, context: &Value) {
         let doc = &context["doc"];
+        if context["workspace_id"].is_string(){
+            if context["workspace_id"].as_str()!=self.workspace.as_deref(){return}
+            let Ok(found)=rpc(json!({"op":"chat.source_document","workspace_id":context["workspace_id"],"id":doc["id"]})) else {
+                self.set_status("이 과목에서 자료를 열 수 없어요");return
+            };
+            if !self.open_doc(found){return}
+            if let Some(page)=context["page"].as_u64().and_then(|p|p.checked_sub(1)){
+                if self.document.as_ref().is_some_and(|d|d["hash"]==context["hash"]){
+                    if let Some(pdf)=self.preview.as_ref().and_then(|view|pdf_view(view)){
+                        let document:Option<Retained<AnyObject>>=msg_send![&*pdf, document];
+                        if let Some(document)=document{
+                            let count:usize=msg_send![&*document,pageCount];
+                            if (page as usize)<count{
+                                let dest:Option<Retained<AnyObject>>=msg_send![&*document,pageAtIndex:page as usize];
+                                if let Some(dest)=dest{let _:()=msg_send![&*pdf,goToPage:&*dest];return}
+                            }
+                        }
+                    }
+                }
+                self.set_status("자료가 바뀌어 문서로 이동했어요");
+            } else if doc["kind"]=="md" {
+                let quote=strv(context,"quote");
+                if !quote.is_empty(){
+                    let body=self.text.string().to_string();
+                    if let Some(start)=body.find(&quote){
+                        let range=NSRange::new(body[..start].encode_utf16().count(),quote.encode_utf16().count());
+                        self.text.setSelectedRange(range);
+                        self.text.scrollRangeToVisible(range);
+                    }else{self.set_status("자료가 바뀌어 문서로 이동했어요");}
+                }
+            }
+            return
+        }
         let open_id = self.document.as_ref().map(|d| strv(d, "id")).unwrap_or_default();
         let same = if doc.is_object() { strv(doc, "id") == open_id } else { self.note_source().is_some_and(|n| n.title == strv(context, "title")) };
         if !same {

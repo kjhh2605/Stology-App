@@ -3,7 +3,6 @@ use super::*;
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader},
-    process::ChildStdin,
 };
 thread_local! {
     static EVENTS:RefCell<Vec<i64>>=const{RefCell::new(Vec::new())};
@@ -210,7 +209,8 @@ fn enqueue(event: i64) {
 }
 struct Running {
     rx: mpsc::Receiver<Value>,
-    input: ChildStdin,
+    stop: mpsc::Sender<()>,
+    pending: Value,
     workspace: String,
     provider: String,
     conversation: String,
@@ -224,6 +224,11 @@ struct Running {
     images: usize,
     /// 이 질문에 붙인 노트.
     context: Value,
+}
+impl Running {
+    fn pending_in(&self, workspace: Option<&str>, provider: &str) -> bool {
+        !self.accepted && workspace == Some(self.workspace.as_str()) && provider == self.provider
+    }
 }
 pub struct Panel {
     pub view: Retained<NSView>,
@@ -287,6 +292,7 @@ pub struct Panel {
     data: Value,
     last_draft: String,
     positions: HashMap<String, NSPoint>,
+    source_jobs: Vec<mpsc::Receiver<(String, Value)>>,
     running: Option<Running>,
     error: String,
     connection: String,
@@ -564,7 +570,7 @@ impl Panel {
         status.setMaximumNumberOfLines(3);
         view.addSubview(&status);
         let notice = text_label(
-            "입력한 대화와 붙인 노트만 전송돼요 · ⌘ + Enter 전송",
+            "질문과 직접 첨부한 내용만 전송돼요 · ⌘ + Enter 전송",
             rect(12., 144., 316., 18.),
             10.5,
             false,
@@ -730,6 +736,7 @@ impl Panel {
             data: Value::Null,
             last_draft: String::new(),
             positions: HashMap::new(),
+            source_jobs: Vec::new(),
             running: None,
             error: String::new(),
             connection: "연결 확인 중".into(),
@@ -789,6 +796,7 @@ impl Panel {
             }
         }
         self.model.addItemWithTitle(&NSString::from_str("목록 새로고침…"));
+        self.model.addItemWithTitle(&NSString::from_str("과목 자료 발췌로 비교 답변 생성…"));
         self.restore_model_selection();
         self.fill_efforts();
     }
@@ -955,7 +963,7 @@ impl Panel {
         }
     }
     pub unsafe fn save_draft(&mut self) -> Result<(), String> {
-        if self.workspace.is_none() {
+        if self.workspace.is_none() || self.running.as_ref().is_some_and(|r| r.pending_in(self.workspace.as_deref(), &self.selected)) {
             return Ok(());
         }
         let draft = self.input.string().to_string();
@@ -1024,7 +1032,8 @@ impl Panel {
             }
         }
         self.last_draft = strv(&self.data, "draft");
-        self.input.setString(&NSString::from_str(&self.last_draft));
+        let pending = self.running.as_ref().is_some_and(|r| r.pending_in(self.workspace.as_deref(), &self.selected));
+        self.input.setString(&NSString::from_str(if pending { "" } else { &self.last_draft }));
         // 붙인 노트는 그 과목의 질문에만 간다.
         self.attached = None;
         self.note_chip.close_preview();
@@ -1116,9 +1125,19 @@ impl Panel {
         self.layout(w, h);
     }
     unsafe fn render(&mut self) {
-        if self
-            .messages
-            .update(&self.data, &self.selected, &self._target)
+        let notice = if self.data["source_excerpts"] == true {
+            "자료 비교 시 관련 발췌도 전송돼요 · ⌘ + Enter 전송"
+        } else {
+            "질문과 직접 첨부한 내용만 전송돼요 · ⌘ + Enter 전송"
+        };
+        if self.notice.stringValue().to_string() != notice {
+            self.notice.setStringValue(&NSString::from_str(notice));
+        }
+
+        let pending = self.running.as_ref()
+            .filter(|r| r.pending_in(self.workspace.as_deref(), &self.selected) && !r.terminal)
+            .map(|r| &r.pending);
+        if self.messages.update(&self.data, pending, &self.selected, &self._target)
         {
             self.bottom.setHidden(false);
         }
@@ -1227,16 +1246,18 @@ impl Panel {
         let request = json!({"workspace_id":self.workspace,"provider":self.selected,"model":self.selected_model(),"effort":self.selected_effort(),"text":prompt,
             "images":self.attachments.iter().map(|a|json!({"mime":a.mime,"data":a.data})).collect::<Vec<_>>(),
             "context":context});
-        if writeln!(input, "{request}")
-            .and_then(|_| input.flush())
-            .is_err()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            self.error = "대화 요청을 접수하지 못했습니다".into();
-            return;
-        }
         let (tx, rx) = mpsc::channel();
+        let (stop, stop_requests) = mpsc::channel();
+        let errors = tx.clone();
+        std::thread::spawn(move || {
+            if writeln!(input, "{request}").and_then(|_| input.flush()).is_err() {
+                let _ = errors.send(json!({"event":"failed","error":"대화 요청을 접수하지 못했습니다"}));
+                return;
+            }
+            if stop_requests.recv().is_ok() {
+                let _ = writeln!(input, "{{\"op\":\"stop\"}}").and_then(|_| input.flush());
+            }
+        });
         std::thread::spawn(move || {
             for line in BufReader::new(output).lines() {
                 let Ok(line) = line else { break };
@@ -1252,7 +1273,8 @@ impl Panel {
         self.error.clear();
         self.running = Some(Running {
             rx,
-            input,
+            stop,
+            pending: json!({"id":"pending","user":prompt,"images":self.attachments.len(),"context":context,"answer":"","state":"running"}),
             workspace: self.workspace.clone().unwrap(),
             provider: self.selected.clone(),
             conversation: String::new(),
@@ -1266,6 +1288,9 @@ impl Panel {
             images: self.attachments.len(),
             context,
         });
+        self.input.setString(&NSString::from_str(""));
+        self.scroll_to_bottom = true;
+        self.render();
     }
     fn history_content_height(&self) -> f64 {
         if self.matches.is_empty() {
@@ -1563,7 +1588,7 @@ impl Panel {
        let i=(n-chat_attachments::CLOSE_TAG as i64) as usize;
        if i<self.attachments.len(){self.attachments.remove(i);self.attachments_changed();}
    },
-   11=>{if self.busy(){if let Some(r)=&mut self.running {let _=writeln!(r.input,"{{\"op\":\"stop\"}}");let _=r.input.flush();}}else{self.send();}},
+   11=>{if self.busy(){if let Some(r)=&mut self.running {let _=r.stop.send(());}}else{self.send();}},
    9=>{
        let index = self.model.indexOfSelectedItem() as usize;
        if !self.busy() {
@@ -1586,6 +1611,20 @@ impl Panel {
                }
                self.restore_model_selection();
                self.fill_efforts();
+           } else if index==self.model_items.len()+1 {
+               self.restore_model_selection();
+               if self.workspace.is_some(){
+                   let alert=NSAlert::new(mtm());
+                   let current=if self.data["source_excerpts"]==true{"켜짐"}else{"꺼짐"};
+                   alert.setMessageText(&NSString::from_str(&format!("과목 자료 발췌로 비교 답변 생성 · {current}")));
+                   alert.setInformativeText(&NSString::from_str("자료 비교를 요청하면 관련 자료 최대 3개의 제목과 발췌를 선택한 AI 공급자에게 보내 추가 답변을 만듭니다. 꺼도 로컬 자료 링크는 표시합니다."));
+                   for title in ["켜기","끄기","취소"]{alert.addButtonWithTitle(&NSString::from_str(title));}
+                   let choice=alert.runModal();
+                   if choice==1000 || choice==1001{
+                       let mut req=self.request("chat.source_preferences");req["enabled"]=json!(choice==1000);
+                       match rpc(req){Ok(value)=>self.data["source_excerpts"]=value,Err(e)=>self.error=e}
+                   }
+               }
            } else {self.refresh_models();}
        } else {self.restore_model_selection();}
    },
@@ -1650,6 +1689,12 @@ impl Panel {
        if turn["context"].is_object(){self.attached=Some(turn["context"].clone());}
        self.input.setString(&NSString::from_str(&prompt));self.send();}else{self.error="작성 중인 질문을 먼저 전송하거나 비워 주세요.".into();}}},
    n if (chat_messages::NOTE_TAG as i64..chat_messages::NOTE_TAG as i64+3000).contains(&n)=>self.note_action(n-chat_messages::NOTE_TAG as i64),
+   n if n >= chat_messages::SOURCE_TAG => {
+       let index=(n-chat_messages::SOURCE_TAG) as usize;
+       if let Some(source)=self.data["turns"].get(index/3).and_then(|turn|turn["followup"]["sources"].get(index%3)){
+           if source["workspace_id"].as_str()==self.workspace.as_deref(){self.reveal=Some(source.clone());}
+       }
+   },
    n if (chat_messages::CONTEXT_TAG as i64..chat_messages::CONTEXT_TAG as i64+1000).contains(&n)=>{
        let context=self.data["turns"][(n-chat_messages::CONTEXT_TAG as i64) as usize]["context"].clone();
        if context.is_object(){self.reveal=Some(context);}
@@ -1682,6 +1727,9 @@ impl Panel {
             }
             if kind == "process_exit" {
                 if let Some(r) = self.running.take() {
+                    if r.pending_in(self.workspace.as_deref(), &self.selected) {
+                        self.input.setString(&NSString::from_str(&r.prompt));
+                    }
                     if !r.terminal {
                         self.error="연결이 중단되었습니다. 전송 결과를 확인할 수 없어요. 자동 재전송하지 않았습니다.".into();
                     }
@@ -1690,6 +1738,14 @@ impl Panel {
             }
             let Some(r) = &mut self.running else { continue };
             if kind == "accepted" {
+                let mut request=e.clone();
+                request["op"]=json!("chat.sources");
+                let (sender,receiver)=mpsc::channel();
+                self.source_jobs.push(receiver);
+                std::thread::spawn(move || {
+                    let turn=strv(&request,"turn_id");
+                    if let Ok(result)=rpc(request){let _=sender.send((turn,result));}
+                });
                 r.accepted = true;
                 clear_attachments = true;
                 r.conversation = strv(&e, "conversation_id");
@@ -1746,6 +1802,16 @@ impl Panel {
                 }
             }
         }
+        self.source_jobs.retain(|job| match job.try_recv() {
+            Ok((id,result)) => {
+                if let Some(turn)=self.data["turns"].as_array_mut().and_then(|all|all.iter_mut().find(|t|t["id"]==id)){
+                    turn["followup"]=result;
+                }
+                false
+            }
+            Err(mpsc::TryRecvError::Empty)=>true,
+            Err(mpsc::TryRecvError::Disconnected)=>false,
+        });
         if clear_attachments && !self.attachments.is_empty() {
             self.attachments.clear();
             self.attachments_changed();
@@ -1882,8 +1948,7 @@ impl Panel {
     pub unsafe fn prepare_quit(&mut self) -> Result<bool, String> {
         self.save_draft()?;
         if let Some(r) = &mut self.running {
-            writeln!(r.input, "{{\"op\":\"stop\"}}").ok();
-            r.input.flush().ok();
+            let _ = r.stop.send(());
             return Ok(false);
         }
         if self.unsaved.is_some() || self.error.contains("저장 실패") {

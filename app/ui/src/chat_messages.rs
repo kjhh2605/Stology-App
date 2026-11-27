@@ -118,7 +118,11 @@ impl WaitingDots {
         }
     }
 }
+pub const SOURCE_TAG:i64=1_000_000;
 struct Bubble {
+    followup: Value,
+    follow_label: Retained<NSTextField>,
+    sources: Vec<Retained<NSButton>>,
     shell: Retained<NSView>,
     background: Retained<NSView>,
     label: Retained<NSTextField>,
@@ -247,13 +251,14 @@ impl Messages {
             self.restore(old);
         }
     }
-    pub unsafe fn update(&mut self, data: &Value, provider: &str, target: &AnyObject) -> bool {
+    pub unsafe fn update(&mut self, data: &Value, pending: Option<&Value>, provider: &str, target: &AnyObject) -> bool {
         let bounds = self.scroll.contentView().bounds();
         let near = bounds.origin.y + bounds.size.height >= self.document.frame().size.height - 40.;
         let mut changed = false;
         let mut order = Vec::new();
-        if let Some(turns) = data["turns"].as_array() {
-            for (i, t) in turns.iter().enumerate() {
+        {
+            let saved = data["turns"].as_array().into_iter().flatten();
+            for (i, t) in saved.chain(pending).enumerate() {
                 for user in [true, false] {
                     let key = format!("{}/{}", strv(t, "id"), user);
                     order.push(key.clone());
@@ -332,10 +337,15 @@ impl Messages {
                             b.setAccessibilityLabel(Some(&NSString::from_str(&format!("붙인 노트 {} · {} · 노트에서 보기", strv(c, "title"), strv(c, "label")))));
                             b
                         });
+                        let follow_label=NSTextField::wrappingLabelWithString(&NSString::from_str(""),mtm());
+                        follow_label.setFont(Some(&font::regular(12.)));
+                        follow_label.setHidden(true);
+                        shell.addSubview(&follow_label);
                         self.document.addSubview(&shell);
                         self.bubbles.insert(
                             key.clone(),
                             Bubble {
+                                followup:Value::Null, follow_label, sources:Vec::new(),
                                 shell,
                                 background,
                                 label,
@@ -355,6 +365,25 @@ impl Messages {
                         changed = true;
                     }
                     let b = self.bubbles.get_mut(&key).unwrap();
+                    let follow=if !user && state=="completed"{&t["followup"]}else{&Value::Null};
+                    if &b.followup!=follow {
+                        for button in b.sources.drain(..){button.removeFromSuperview();}
+                        b.follow_label.setStringValue(&NSString::from_str(&strv(follow,"message")));
+                        b.follow_label.setHidden(!follow.is_object());
+                        for (j,source) in follow["sources"].as_array().into_iter().flatten().take(3).enumerate(){
+                            let mut title=strv(source,"title");
+                            if let Some(page)=source["page"].as_u64(){title.push_str(&format!(" · {page}쪽"));}
+                            let button=NSButton::buttonWithTitle_target_action(&NSString::from_str(&title),Some(target),Some(sel!(chatAction:)),mtm());
+                            button.setTag(SOURCE_TAG as isize+(3*i+j) as isize);
+                            button.setToolTip(Some(&NSString::from_str(&strv(source,"quote"))));
+                            button.setEnabled(source["deleted"]!=true);
+                            context_title(&button,&title);
+                            b.shell.addSubview(&button);
+                            b.sources.push(button);
+                        }
+                        b.followup=follow.clone();
+                        changed=true;
+                    }
                     if b.body != body || b.state != state || b.marks != marks || changed {
                         let selection = NSTextInputClient::selectedRange(&*b.text);
                         b.text.setString(&NSString::from_str(&body));
@@ -474,7 +503,18 @@ impl Messages {
             let top = if b.context.is_some() { CONTEXT_HEIGHT } else { 0. };
             let row_width = if b.user { bubble_width.max(tag_width) } else { (w - side * 2.).max(bubble_width) };
             let x = if b.user { w - side - row_width } else { side };
-            b.shell.setFrame(rect(x, y, row_width, top + bubble_height + footer));
+            let mut row_height=top+bubble_height+footer;
+            if b.followup.is_object(){
+                b.follow_label.setPreferredMaxLayoutWidth(row_width-8.);
+                let h=b.follow_label.intrinsicContentSize().height.ceil().max(18.);
+                b.follow_label.setFrame(rect(4.,row_height+4.,row_width-8.,h));
+                row_height+=h+6.;
+                for button in &b.sources {
+                    button.setFrame(rect(4.,row_height,(button.intrinsicContentSize().width+10.).min(row_width-8.),23.));
+                    row_height+=25.;
+                }
+            }
+            b.shell.setFrame(rect(x, y, row_width, row_height));
             let bubble_x = if b.user { row_width - bubble_width } else { 0. };
             if let Some(c) = &b.context { c.setFrame(rect(row_width - tag_width, 0., tag_width, CONTEXT_HEIGHT - 4.)); }
             b.background.setFrame(rect(bubble_x, top, bubble_width, bubble_height));
@@ -499,7 +539,7 @@ impl Messages {
                 }
             }
             b.label.setFrame(rect(next + 2., bubble_height + 4., 120., 14.));
-            y += top + bubble_height + footer + 10.;
+            y += row_height + 10.;
         }
         // 말풍선 사이는 10pt, 마지막 말풍선 아래는 그 절반만 남긴다.
         if !self.order.is_empty() { y -= 5.; }

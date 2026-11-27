@@ -136,6 +136,9 @@ pub(super) fn delete(root: &Path, c: &Connection, id: &str) -> Result<()> {
             continue;
         }
         if db == "chat" {
+            if c.query_row("SELECT EXISTS(SELECT 1 FROM chat.sqlite_master WHERE type='table' AND name='preferences')",[],|row|row.get::<_,bool>(0))? {
+                c.execute("DELETE FROM chat.preferences WHERE key=?1",[format!("sources.excerpts.{id}")])?;
+            }
             for convo in strings(
                 c,
                 "SELECT id FROM chat.conversations WHERE workspace=?1",

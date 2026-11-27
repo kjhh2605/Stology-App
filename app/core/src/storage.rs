@@ -339,7 +339,7 @@ fn hidden_folder(path: &Path) -> Result<bool> {
     }
     Ok(false)
 }
-fn inside_hidden_folder(base: &Path, relative_path: &str) -> Result<bool> {
+pub(crate) fn inside_hidden_folder(base: &Path, relative_path: &str) -> Result<bool> {
     let mut current = base.to_path_buf();
     if let Some(parent) = Path::new(relative_path).parent() {
         for component in parent.components() {

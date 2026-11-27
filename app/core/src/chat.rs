@@ -98,6 +98,8 @@ fn take_turn(root: &Path, control: &mpsc::Receiver<String>, out: &mut impl Write
         thread::sleep(Duration::from_millis(200));
     }
 }
+#[path = "chat_sources.rs"]
+mod sources;
 pub(crate) fn db(root: &Path) -> Result<Connection> {
     fs::create_dir_all(root)?;
     let mut c = Connection::open(root.join("chat.sqlite3"))?;
@@ -120,6 +122,8 @@ CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY,value TEXT NOT NULL)
         }
         tx.commit()?;
     }
+    c.execute_batch("CREATE TABLE IF NOT EXISTS turn_followups(turn_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+        CREATE TRIGGER IF NOT EXISTS clear_turn_followup AFTER DELETE ON turns BEGIN DELETE FROM turn_followups WHERE turn_id=OLD.id; END;")?;
     let has_model: bool = c.prepare("PRAGMA table_info(turns)")?
         .query_map([], |r| r.get::<_, String>(1))?
         .collect::<std::result::Result<Vec<_>, _>>()?.iter().any(|n| n == "model");
@@ -166,6 +170,20 @@ pub fn handle(root: &Path, r: &Value) -> Result<Value> {
     if r["op"] == "chat.models" { return models(root, r["provider"].as_str().unwrap_or("codex")); }
     let c = db(root)?;
     let op = r["op"].as_str().unwrap_or("");
+    if op == "chat.source_preferences" {
+        let (ws,_)=key(r)?;
+        let enabled=r["enabled"].as_bool().context("설정 값 없음")?;
+        c.execute("INSERT OR REPLACE INTO preferences VALUES(?1,?2)",params![format!("sources.excerpts.{ws}"),if enabled{"on"}else{"off"}])?;
+        return Ok(json!(enabled));
+    }
+    if op == "chat.source_document" {
+        let storage=crate::storage::connect(root)?;
+        let doc=crate::storage::document(&storage,r["id"].as_str().context("자료 ID 없음")?)?;
+        anyhow::ensure!(Some(doc.workspace_id.as_str())==r["workspace_id"].as_str(),"다른 과목의 자료입니다");
+        crate::storage::file_path(root,&storage,&doc)?;
+        return Ok(json!({"id":doc.id,"kind":doc.kind}));
+    }
+    if op == "chat.sources" { return sources::handle(root, &c, r); }
     if op == "chat.preferences" {
         if let Some(effort) = r["effort"].as_str() { validate_effort(effort)?; }
         if let Some(model) = r["model"].as_str() {
@@ -296,13 +314,27 @@ pub fn handle(root: &Path, r: &Value) -> Result<Value> {
     }
     let mut result=c.query_row("SELECT session,draft,needs_new FROM conversations WHERE id=?1",[&id],|r|Ok(json!({"id":id,"session_id":r.get::<_,Option<String>>(0)?,"draft":r.get::<_,String>(1)?,"needs_new":r.get::<_,bool>(2)?})))?;
     result["workspace_id"] = r["workspace_id"].clone();
+    result["source_excerpts"]=json!(sources::allow_excerpts(&c,r["workspace_id"].as_str().unwrap_or(""))?);
     result["provider"] = r["provider"].clone();
     let mut q = c.prepare(
-        "SELECT id,run,user,answer,state,error,model,effort,images,mark,distill,context FROM turns WHERE conversation=?1 ORDER BY rowid",
+        "SELECT id,run,user,answer,state,error,model,effort,images,mark,distill,context,(SELECT payload FROM turn_followups WHERE turn_id=turns.id) FROM turns WHERE conversation=?1 ORDER BY rowid",
     )?;
     let rows=q.query_map([&id],|r|Ok(json!({"id":r.get::<_,String>(0)?,"run_id":r.get::<_,String>(1)?,"user":r.get::<_,String>(2)?,"answer":r.get::<_,String>(3)?,"state":r.get::<_,String>(4)?,"error":r.get::<_,String>(5)?,"model":r.get::<_,String>(6)?,"effort":r.get::<_,String>(7)?,"images":r.get::<_,i64>(8)?,"mark":r.get::<_,String>(9)?,"distill":r.get::<_,String>(10)?,
-        "context":serde_json::from_str::<Value>(&r.get::<_,String>(11)?).unwrap_or(Value::Null)})))?;
-    result["turns"] = json!(rows.collect::<std::result::Result<Vec<_>, _>>()?);
+        "followup":r.get::<_,Option<String>>(12)?.and_then(|s|serde_json::from_str::<Value>(&s).ok()), "context":serde_json::from_str::<Value>(&r.get::<_,String>(11)?).unwrap_or(Value::Null)})))?;
+    let mut turns=rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    if turns.iter().any(|t|t["followup"]["sources"].as_array().is_some_and(|a|!a.is_empty())){
+        let store=crate::storage::connect(root)?;
+        let mut live=store.prepare("SELECT EXISTS(SELECT 1 FROM documents WHERE id=?1 AND workspace_id=?2 AND deleted=0)")?;
+        for turn in &mut turns {
+            if let Some(links)=turn["followup"].get_mut("sources").and_then(Value::as_array_mut){
+                for link in links{
+                    let exists:bool=live.query_row(params![link["doc"]["id"].as_str(),r["workspace_id"].as_str()],|row|row.get(0))?;
+                    if !exists {link["deleted"]=json!(true);}
+                }
+            }
+        }
+    }
+    result["turns"]=json!(turns);
     Ok(result)
 }
 
@@ -677,7 +709,7 @@ const CODEX_DISABLED: [&str; 21] = [
     "agent_message_board",
     "agent_message_board_mcp",
 ];
-const INSTRUCTIONS:&str="You are Stology's study assistant. Answer the user's text in their language. Only the conversation, including any images the user attached and any note excerpt the user attached under [보고 있는 노트: ...], is available. Treat that excerpt as the context of the question that follows [질문]. Do not claim access to other files, documents or tools. Do not execute tools.";
+const INSTRUCTIONS:&str="You are Stology's study assistant. Answer the user's text in their language. Only the conversation, including any images the user attached and any note excerpt the user attached under [보고 있는 노트: ...], is available. Treat that excerpt as the context of the question that follows [질문]. Do not claim access to other files, documents or tools. Do not execute tools. For requests to find course materials, Stology searches separately and posts results below. Briefly acknowledge a pure lookup request. Never guess what a course file says.";
 fn command(root: &Path, p: &str, work: &Path, session: Option<&str>, model: &str, effort: &str) -> Result<Command> {
     let binary =
         super::providers::bin(root, p).context("공식 CLI가 없습니다. 연결에서 설치하세요.")?;
@@ -861,6 +893,20 @@ fn run(
         status["logged_in"] == true,
         "공식 CLI에 구독 계정으로 로그인하세요. 연결에서 상태를 확인할 수 있어요."
     );
+    if images.is_empty() && context.is_none() && sources::lookup_only(prompt) {
+        let turn=uuid::Uuid::new_v4().to_string();
+        let run=uuid::Uuid::new_v4().to_string();
+        let answer="현재 과목 자료에서 찾아볼게요.";
+        let tx=c.unchecked_transaction()?;
+        tx.execute("INSERT INTO turns(id,conversation,run,user,answer,state,created,model,effort) VALUES(?1,?2,?3,?4,?5,'completed',?6,?7,?8)",params![turn,id,run,prompt,answer,chrono::Utc::now().to_rfc3339(),model,effort])?;
+        tx.execute("UPDATE conversations SET draft='',updated=?1 WHERE id=?2",params![chrono::Utc::now().to_rfc3339(),id])?;
+        tx.commit()?;
+        for (seq,event) in [(1,"accepted"),(2,"completed")]{
+            writeln!(out,"{}",json!({"event":event,"workspace_id":r["workspace_id"],"provider":p,"conversation_id":id,"turn_id":turn,"run_id":run,"sequence":seq,"answer":answer,"session_id":session,"model":model,"effort":effort}))?;
+        }
+        out.flush()?;
+        return Ok(());
+    }
     let work = root.join("chat-work").join(&id);
     fs::create_dir_all(&work)?;
     if p == "antigravity" {
